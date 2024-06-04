@@ -41,6 +41,20 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
     return pgidx;
 }
 
+
+// [Brian] modify
+static inline void set_RTTbit(struct ssd *ssd, struct ppa *ppa)
+{
+    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    ssd->RTTtbl[physical_page_num] = 1;
+}
+
+static inline void clr_RTTbit(struct ssd *ssd, struct ppa *ppa)
+{
+    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    ssd->RTTtbl[physical_page_num] = 0;
+}
+
 static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
 {
     uint64_t pgidx = ppa2pgidx(ssd, ppa);
@@ -350,6 +364,28 @@ static void ssd_init_maptbl(struct ssd *ssd)
     }
 }
 
+// [Brian] modify
+static void ssd_init_RTT(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    ssd->RTTtbl = g_malloc0(spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        ssd->RTTtbl[i] = false;
+    }
+}
+
+// [Brian] modify
+static void ssd_init_OOB(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    printf("spp->tt_pgs : %d\r\n", spp->tt_pgs);
+    ssd->OOB = g_malloc0(OUT_OF_BOND_SPACE_SIZE_PER_PAGE * spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        ssd->OOB[i] = 0;
+    }
+}
+
 static void ssd_init_rmap(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -377,6 +413,14 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize maptbl */
     ssd_init_maptbl(ssd);
+    printf("====1\r\n");
+    // [Brian] modify
+    /* initialize RTT */
+    ssd_init_RTT(ssd);
+    printf("====2\r\n");
+    /* initialize OOB */
+    ssd_init_OOB(ssd);
+    printf("====3\r\n");
 
     /* initialize rmap */
     ssd_init_rmap(ssd);
@@ -792,6 +836,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             continue;
         }
 
+        set_RTTbit(ssd, ppa);
         struct nand_cmd srd;
         srd.type = USER_IO;
         srd.cmd = NAND_READ;

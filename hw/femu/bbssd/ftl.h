@@ -7,6 +7,9 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
+// [Brian] modify
+#define OUT_OF_BOND_SPACE_SIZE_PER_PAGE  32
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -199,6 +202,11 @@ struct ssd {
     struct ssdparams sp;
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
+    
+    // [Brian] modify
+    bool *RTTtbl; /* read track bitmap */
+    char *OOB; /* out of bond space (size define OUT_OF_BOND_SPACE_SIZE_PER_PAGE)*/
+
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
