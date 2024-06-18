@@ -220,6 +220,10 @@ struct ssd {
 
 void ssd_init(FemuCtrl *n);
 
+int backend_rw_from_flash(SsdDramBackend *, NvmeRequest *req, uint64_t *, bool, struct ssd *, uint64_t *);
+
+uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *maxlat);
+
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
     do { printf("[FEMU] FTL-Dbg: " fmt, ## __VA_ARGS__); } while (0)
