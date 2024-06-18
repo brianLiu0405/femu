@@ -541,9 +541,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
+    // [Brian] modify dram size (for flash data use)
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
-
-    init_dram_backend(&n->mbe, bs_size);
+    init_dram_backend(&n->mbe, (bs_size / 3 * 4));
     n->mbe->femu_mode = n->femu_mode;
 
     n->completed = 0;
