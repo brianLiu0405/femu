@@ -41,7 +41,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
 
-    uint16_t status;
+    // uint16_t status;
     hwaddr addr;
     NvmeCmd cmd;
     NvmeRequest *req;
@@ -72,20 +72,21 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             femu_debug("%s,cid:%d\n", __func__, cmd.cid);
         }
 
-        status = nvme_io_cmd(n, &cmd, req);
-        if (1 && status == NVME_SUCCESS) {
-            req->status = status;
+        // status = nvme_io_cmd(n, &cmd, req);
+        
+        // if (1 && status == NVME_SUCCESS) {
+        // req->status = status;
 
-            int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
-            if (rc != 1) {
-                femu_err("enqueue failed, ret=%d\n", rc);
-            }
-        } else if (status == NVME_SUCCESS) {
-            /* Normal I/Os that don't need delay emulation */
-            req->status = status;
-        } else {
-            femu_err("Error IO processed!\n");
+        int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
+        if (rc != 1) {
+            femu_err("enqueue failed, ret=%d\n", rc);
         }
+        // } else if (status == NVME_SUCCESS) {
+        //     /* Normal I/Os that don't need delay emulation */
+        //     req->status = status;
+        // } else {
+        //     femu_err("Error IO processed!\n");
+        // }
 
         processed++;
     }
