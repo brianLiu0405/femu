@@ -204,6 +204,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
                 check_addr(wpp->blk, spp->blks_per_pl);
                 wpp->curline = NULL;
                 wpp->curline = get_next_free_line(ssd);
+                // [brian_TODO] add get new block need erase block
                 if (!wpp->curline) {
                     /* TODO */
                     abort();
@@ -654,8 +655,14 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->erase_cnt++;
 }
 
-static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
+static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data, void *mb)
 {
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+    for(int i=0; i<bytes_per_pages; i++){
+        data[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
+    }
     /* advance ssd status, we don't care about how long it takes */
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcr;
@@ -667,7 +674,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, void *mb)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -675,6 +682,22 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
+
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    uint64_t new_physical_page_num = ppa2pgidx(ssd, &new_ppa);
+    for(int i=0; i<bytes_per_pages; i++){
+        ((char*)(mb + (new_physical_page_num * bytes_per_pages)))[i] = data[i];
+    }
+
+    // check data correct
+    uint64_t old_physical_page_num = ppa2pgidx(ssd, &new_ppa);
+    for(int i=0; i<bytes_per_pages; i++){
+        if(((char*)(mb + (new_physical_page_num * bytes_per_pages)))[i] == ((char*)(mb + (old_physical_page_num * bytes_per_pages)))[i]){
+            printf("data move error, data incorrect\r\n");
+        }
+    }
+
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
@@ -728,11 +751,12 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 }
 
 /* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
+static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
+    int page_size = spp->secsz * spp->secs_per_pg;
 
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
@@ -740,9 +764,11 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
-            gc_read_page(ssd, ppa);
+            char *data = g_malloc0(page_size);
+            gc_read_page(ssd, ppa, data, mb);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            gc_write_page(ssd, ppa, data, mb);
+            g_free(data);
             cnt++;
         }
     }
@@ -761,7 +787,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-static int do_gc(struct ssd *ssd, bool force)
+static int do_gc(struct ssd *ssd, bool force, void* mb)
 {
     struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
@@ -786,7 +812,7 @@ static int do_gc(struct ssd *ssd, bool force)
             ppa.g.lun = lun;
             ppa.g.pl = 0;
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);
+            clean_one_block(ssd, &ppa, mb);
             mark_block_free(ssd, &ppa);
 
             if (spp->enable_gc_delay) {
@@ -1031,7 +1057,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
     } else {
         femu_err("Error IO processed!\n");
     }
-    
+
     return maxlat;
 }
 
@@ -1121,7 +1147,7 @@ static void *ftl_thread(void *arg)
 
             /* clean one line if needed (in the background) */
             if (should_gc(ssd)) {
-                do_gc(ssd, false);
+                do_gc(ssd, false, n->mbe->logical_space);
             }
         }
     }
