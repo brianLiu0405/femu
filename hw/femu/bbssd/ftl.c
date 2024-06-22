@@ -151,7 +151,7 @@ static inline void check_addr(int a, int max)
     ftl_assert(a >= 0 && a < max);
 }
 
-static struct line *get_next_free_line(struct ssd *ssd)
+static struct line *get_next_free_line(struct ssd *ssd, void *mb)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
@@ -164,10 +164,32 @@ static struct line *get_next_free_line(struct ssd *ssd)
 
     QTAILQ_REMOVE(&lm->free_line_list, curline, entry);
     lm->free_line_cnt--;
+
+    // clean current line
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    for(int ch=0; ch<spp->nchs; ch++){
+        for(int lun=0; lun<spp->luns_per_ch; lun++){
+            for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                struct ppa ppa;
+                ppa.ppa = 0;
+                ppa.g.ch = ch;
+                ppa.g.lun = lun;
+                ppa.g.pg = pg;
+                ppa.g.blk = curline->id;
+                ppa.g.pl = 0;
+                uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                for(int i=0; i<bytes_per_pages; i++){
+                    ((char*)(mb + (physical_page_num * bytes_per_pages)))[i] = 0;
+                }
+            }
+        }
+    }
+
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd)
+static void ssd_advance_write_pointer(struct ssd *ssd, void *mb)
 {
     struct ssdparams *spp = &ssd->sp;
     struct write_pointer *wpp = &ssd->wp;
@@ -203,7 +225,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
                 /* current line is used up, pick another empty line */
                 check_addr(wpp->blk, spp->blks_per_pl);
                 wpp->curline = NULL;
-                wpp->curline = get_next_free_line(ssd);
+                wpp->curline = get_next_free_line(ssd, mb);
                 // [brian_TODO] add get new block need erase block
                 if (!wpp->curline) {
                     /* TODO */
@@ -706,7 +728,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     mark_page_valid(ssd, &new_ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, mb);
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -904,7 +926,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             mark_page_valid(ssd, &ppa);
 
             /* need to advance the write pointer here */
-            ssd_advance_write_pointer(ssd);
+            ssd_advance_write_pointer(ssd, mb);
 
 
             // if (dma_memory_rw(qsg->as, cur_addr, mb + (physical_page_num * 4096), cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
