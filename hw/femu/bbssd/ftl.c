@@ -681,7 +681,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data, void *mb)
 {
     struct ssdparams *spp = &ssd->sp;
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
     for(int i=0; i<bytes_per_pages; i++){
         data[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
     }
@@ -881,7 +881,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
         while (should_gc_high(ssd)) {
             /* perform GC here until !should_gc(ssd) */
             printf("[GC ing]\r\n");
-            r = do_gc(ssd, true);
+            r = do_gc(ssd, true, mb);
             if (r == -1)
                 break;
         }
@@ -1146,9 +1146,11 @@ static void *ftl_thread(void *arg)
             ftl_assert(req);
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
+                printf("SSD #%d\r\n", pthread_self());
                 lat = ssd_write(ssd, req, n);
                 break;
             case NVME_CMD_READ:
+                printf("SSD #%d\r\n", pthread_self());
                 lat = ssd_read(ssd, req, n);
                 break;
             case NVME_CMD_DSM:
