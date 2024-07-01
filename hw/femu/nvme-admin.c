@@ -957,6 +957,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
                                       uint8_t meta_loc, uint8_t pil, uint8_t pi,
                                       uint8_t sec_erase)
 {
+    printf("sec_erase  %08x\r\n", sec_erase);
     NvmeIdNs *id_ns = &ns->id_ns;
     uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
 
@@ -1002,7 +1003,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t pil = (dw10 >> 5) & 0x8;
     uint8_t pi = (dw10 >> 5) & 0x7;
     uint8_t sec_erase = (dw10 >> 8) & 0x7;
-
+    printf("lba_idx    %08x\r\n", lba_idx);
+    printf("meta_loc   %08x\r\n", meta_loc);
+    printf("pil        %08x\r\n", pil);
+    printf("pi         %08x\r\n", pi);
+    printf("sec_erase  %08x\r\n", sec_erase);
+    printf("nsid       %dx\r\n", nsid);
     if (nsid == 0xffffffff) {
         uint16_t ret = NVME_SUCCESS;
 
