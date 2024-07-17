@@ -953,11 +953,10 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
+static uint16_t nvme_format_namespace(FemuCtrl *n, NvmeNamespace *ns, uint8_t lba_idx,
                                       uint8_t meta_loc, uint8_t pil, uint8_t pi,
                                       uint8_t sec_erase)
 {
-    printf("sec_erase  %08x\r\n", sec_erase);
     NvmeIdNs *id_ns = &ns->id_ns;
     uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
 
@@ -989,6 +988,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     ns->ns_blks = ns_blks(ns, lba_idx);
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
+    if(sec_erase == 0x2) n->sec_erase = true;
     return NVME_SUCCESS;
 }
 
@@ -1003,18 +1003,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t pil = (dw10 >> 5) & 0x8;
     uint8_t pi = (dw10 >> 5) & 0x7;
     uint8_t sec_erase = (dw10 >> 8) & 0x7;
-    printf("lba_idx    %08x\r\n", lba_idx);
-    printf("meta_loc   %08x\r\n", meta_loc);
-    printf("pil        %08x\r\n", pil);
-    printf("pi         %08x\r\n", pi);
-    printf("sec_erase  %08x\r\n", sec_erase);
-    printf("nsid       %dx\r\n", nsid);
     if (nsid == 0xffffffff) {
         uint16_t ret = NVME_SUCCESS;
 
         for (uint32_t i = 0; i < n->num_namespaces; ++i) {
             ns = &n->namespaces[i];
-            ret = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
+            ret = nvme_format_namespace(n, ns, lba_idx, meta_loc, pil, pi,
                     sec_erase);
             if (ret != NVME_SUCCESS) {
                 return ret;
@@ -1029,7 +1023,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 
     ns = &n->namespaces[nsid - 1];
 
-    return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
+    return nvme_format_namespace(n, ns, lba_idx, meta_loc, pil, pi, sec_erase);
 }
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)

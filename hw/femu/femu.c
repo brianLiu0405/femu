@@ -72,6 +72,9 @@ static int nvme_start_ctrl(FemuCtrl *n)
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0, NVME_AQA_ASQS(n->bar.aqa) +
                  1, NVME_Q_PRIO_HIGH, 1);
 
+    // [Brian] modify
+    n->sec_erase = false;
+
     /* Currently only used by FEMU ZNS extension */
     if (n->ext_ops.start_ctrl) {
         n->ext_ops.start_ctrl(n);
