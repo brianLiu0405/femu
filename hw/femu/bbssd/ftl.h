@@ -197,6 +197,14 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+struct FG_OOB {
+    uint64_t LPA;
+    uint64_t P_PPA;
+    uint64_t Timestamp;
+    uint32_t RIP;
+    uint32_t rsv;
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -205,7 +213,7 @@ struct ssd {
     
     // [Brian] modify
     bool *RTTtbl; /* read track bitmap */
-    char *OOB; /* out of bond space (size define OUT_OF_BOND_SPACE_SIZE_PER_PAGE)*/
+    struct FG_OOB *OOB; /* out of bond space (size define OUT_OF_BOND_SPACE_SIZE_PER_PAGE)*/
 
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;

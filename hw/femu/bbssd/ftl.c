@@ -1,6 +1,11 @@
 #include "../nvme.h"
 #include "ftl.h"
 #define FEMU_DEBUG_FTL
+// #define PRINT_READ_WRITE
+// #define RW_DEBUG
+#define MODIFY
+// #define THREAD
+
 static void *ftl_thread(void *arg);
 
 static inline bool should_gc(struct ssd *ssd)
@@ -226,7 +231,6 @@ static void ssd_advance_write_pointer(struct ssd *ssd, void *mb)
                 check_addr(wpp->blk, spp->blks_per_pl);
                 wpp->curline = NULL;
                 wpp->curline = get_next_free_line(ssd, mb);
-                // [brian_TODO] add get new block need erase block
                 if (!wpp->curline) {
                     /* TODO */
                     abort();
@@ -401,10 +405,14 @@ static void ssd_init_RTT(struct ssd *ssd)
 static void ssd_init_OOB(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
-    printf("spp->tt_pgs : %d\r\n", spp->tt_pgs);
+    // printf("spp->tt_pgs : %d\r\n", spp->tt_pgs);
     ssd->OOB = g_malloc0(OUT_OF_BOND_SPACE_SIZE_PER_PAGE * spp->tt_pgs);
     for (int i = 0; i < spp->tt_pgs; i++) {
-        ssd->OOB[i] = 0;
+        ssd->OOB[i].LPA = 0xFFFFFFFFFFFFFFFF;
+        ssd->OOB[i].P_PPA = 0xFFFFFFFFFFFFFFFF;
+        ssd->OOB[i].Timestamp = 0xFFFFFFFFFFFFFFFF;
+        ssd->OOB[i].RIP = 0xFFFFFFFF;
+        ssd->OOB[i].rsv = 0xFFFFFFFF;
     }
 }
 
@@ -435,6 +443,7 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize maptbl */
     ssd_init_maptbl(ssd);
+
     // [Brian] modify
     /* initialize RTT */
     ssd_init_RTT(ssd);
@@ -708,14 +717,17 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     struct ssdparams *spp = &ssd->sp;
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
     uint64_t new_physical_page_num = ppa2pgidx(ssd, &new_ppa);
+    uint64_t new_start_addr = mb + (new_physical_page_num * bytes_per_pages);
     for(int i=0; i<bytes_per_pages; i++){
-        ((char*)(mb + (new_physical_page_num * bytes_per_pages)))[i] = data[i];
+        ((char*)(new_start_addr))[i] = data[i];
     }
 
     // check data correct
-    uint64_t old_physical_page_num = ppa2pgidx(ssd, &new_ppa);
+    uint64_t old_physical_page_num = ppa2pgidx(ssd, old_ppa);
+    uint64_t old_start_addr = mb + (old_physical_page_num * bytes_per_pages);
+
     for(int i=0; i<bytes_per_pages; i++){
-        if(((char*)(mb + (new_physical_page_num * bytes_per_pages)))[i] == ((char*)(mb + (old_physical_page_num * bytes_per_pages)))[i]){
+        if(((char*)new_start_addr)[i] != ((char*)old_start_addr)[i]){
             printf("data move error, data incorrect\r\n");
         }
     }
@@ -821,7 +833,6 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
     if (!victim_line) {
         return -1;
     }
-
     ppa.g.blk = victim_line->id;
     ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
               victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
@@ -836,7 +847,7 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
             lunp = get_lun(ssd, &ppa);
             clean_one_block(ssd, &ppa, mb);
             mark_block_free(ssd, &ppa);
-
+            
             if (spp->enable_gc_delay) {
                 struct nand_cmd gce;
                 gce.type = GC_IO;
@@ -857,7 +868,6 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
 
 int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, bool is_write, struct ssd *ssd, uint64_t *maxlat)
 {
-    printf("good\r\n");
     QEMUSGList *qsg = &req->qsg;
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
@@ -887,16 +897,21 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
         }
     }
 
-    // printf("in dram, lba %lu \r\n", mb_oft/512);
+    #ifdef RW_DEBUG
+    printf("qsg->nsg: %d\r\n", qsg->nsg);
+    printf("backend_rw_from_flash: lpn_S %lu, lpn_E %lu\r\n", start_lpn, end_lpn);
+    #endif
 
-    // while (sg_cur_index < qsg->nsg) {
-    // printf("qsg->nsg: %d\r\n", qsg->nsg);
-    // printf("backend_rw_from_flash: lpn_S %lu, lpn_E %lu\r\n", start_lpn, end_lpn);
     for (lpn = start_lpn; lpn <= end_lpn; lpn++){
+        #ifdef RW_DEBUG
+        printf("logic page number: %lu\r\n", lpn);
+        #endif
+
         if(sg_cur_index >= qsg->nsg){
             printf("[ERROR] in dram backend rw\r\n");
             break;
         }
+        uint64_t physical_page_num = 0xFFFFFFFFFFFFFFFF;
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
         ppa = get_maptbl_ent(ssd, lpn);
@@ -906,7 +921,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             if (mapped_ppa(&ppa)) {
                 // read modify write
-                uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                physical_page_num = ppa2pgidx(ssd, &ppa);
                 for(int i=0; i<bytes_per_pages; i++){
                     rmw_R_buf[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
                 }
@@ -920,7 +935,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             /* update maptbl */
             set_maptbl_ent(ssd, lpn, &ppa);
-            /* update rmap */
+            /* update rmap */   
             set_rmap_ent(ssd, lpn, &ppa);
 
             mark_page_valid(ssd, &ppa);
@@ -945,6 +960,10 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             for(int i=0; i<bytes_per_pages; i++){
                 ((char*)(mb + (physical_page_num * bytes_per_pages)))[i] = rmw_R_buf[i];
             }
+            struct FG_OOB *current_OOB = &(ssd->OOB[physical_page_num]);
+            current_OOB->LPA = lpn;
+            current_OOB->P_PPA = physical_page_num;
+            current_OOB->Timestamp = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
             struct nand_cmd swr;
             swr.type = USER_IO;
@@ -1050,10 +1069,11 @@ uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeReq
     return NVME_DNR;
 }
 
-#define MODIFY
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
 {
-    printf("\r\nssd_read\r\n");
+    #ifdef PRINT_READ_WRITE
+    printf("ssd_read\r\n");
+    #endif
     /* new write */
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(req->cmd.nsid);
@@ -1085,7 +1105,9 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
 
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
 {
-    printf("\r\nssd_write\r\n");
+    #ifdef PRINT_READ_WRITE
+    printf("ssd_write\r\n");
+    #endif
     /* new write */
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(req->cmd.nsid);
@@ -1114,6 +1136,38 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
     return maxlat;
 }
 
+static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
+
+    void *mb = n->mbe->logical_space;
+
+    // clean current line
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    for(int ch=0; ch<spp->nchs; ch++){
+        for(int lun=0; lun<spp->luns_per_ch; lun++){
+            for(int pls=0; pls<spp->pls_per_lun; pls++){
+                for(int blk=0; blk<spp->blks_per_pl; blk++){
+                    for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                        struct ppa ppa;
+                        ppa.ppa = 0;
+                        ppa.g.ch = ch;
+                        ppa.g.lun = lun;
+                        ppa.g.blk = blk;
+                        ppa.g.pl = pls;
+                        ppa.g.pg = pg;
+                        uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                        for(int i=0; i<bytes_per_pages; i++){
+                            ((char*)(mb + (physical_page_num * bytes_per_pages)))[i] = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    n->sec_erase = false;
+    return 0;
+}
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -1134,6 +1188,7 @@ static void *ftl_thread(void *arg)
     ssd->to_poller = n->to_poller;
 
     while (1) {
+        if(n->sec_erase) ssd_secure_erase(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
@@ -1146,11 +1201,15 @@ static void *ftl_thread(void *arg)
             ftl_assert(req);
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
-                printf("SSD #%d\r\n", pthread_self());
+                #ifdef THREAD
+                printf("\nSSD #%ld\r\n", pthread_self());
+                #endif
                 lat = ssd_write(ssd, req, n);
                 break;
             case NVME_CMD_READ:
-                printf("SSD #%d\r\n", pthread_self());
+                #ifdef THREAD
+                printf("\nSSD #%ld\r\n", pthread_self());
+                #endif
                 lat = ssd_read(ssd, req, n);
                 break;
             case NVME_CMD_DSM:
