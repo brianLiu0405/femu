@@ -1,7 +1,7 @@
 #include "../nvme.h"
 #include "ftl.h"
 #define FEMU_DEBUG_FTL
-// #define PRINT_READ_WRITE
+#define PRINT_READ_WRITE
 // #define RW_DEBUG
 #define MODIFY
 // #define THREAD
@@ -187,6 +187,11 @@ static struct line *get_next_free_line(struct ssd *ssd, void *mb)
                 for(int i=0; i<bytes_per_pages; i++){
                     ((char*)(mb + (physical_page_num * bytes_per_pages)))[i] = 0;
                 }
+                struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+                old_OOB->LPA = INVALID_LPN;
+                old_OOB->P_PPA = INVALID_PPA;
+                old_OOB->Timestamp = INVALID_TIME;
+                old_OOB->RIP = 0;
             }
         }
     }
@@ -408,11 +413,11 @@ static void ssd_init_OOB(struct ssd *ssd)
     // printf("spp->tt_pgs : %d\r\n", spp->tt_pgs);
     ssd->OOB = g_malloc0(OUT_OF_BOND_SPACE_SIZE_PER_PAGE * spp->tt_pgs);
     for (int i = 0; i < spp->tt_pgs; i++) {
-        ssd->OOB[i].LPA = 0xFFFFFFFFFFFFFFFF;
-        ssd->OOB[i].P_PPA = 0xFFFFFFFFFFFFFFFF;
-        ssd->OOB[i].Timestamp = 0xFFFFFFFFFFFFFFFF;
-        ssd->OOB[i].RIP = 0xFFFFFFFF;
-        ssd->OOB[i].rsv = 0xFFFFFFFF;
+        ssd->OOB[i].LPA = INVALID_LPN;
+        ssd->OOB[i].P_PPA = INVALID_PPA;
+        ssd->OOB[i].Timestamp = INVALID_TIME;
+        ssd->OOB[i].RIP = 0;
+        ssd->OOB[i].rsv = 0;
     }
 }
 
@@ -705,7 +710,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data, void *mb)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, void *mb)
+static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, void *mb, int type)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -717,19 +722,39 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     struct ssdparams *spp = &ssd->sp;
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
     uint64_t new_physical_page_num = ppa2pgidx(ssd, &new_ppa);
-    uint64_t new_start_addr = mb + (new_physical_page_num * bytes_per_pages);
+    uint64_t new_start_addr = (uint64_t)mb + (new_physical_page_num * bytes_per_pages);
     for(int i=0; i<bytes_per_pages; i++){
         ((char*)(new_start_addr))[i] = data[i];
     }
 
     // check data correct
     uint64_t old_physical_page_num = ppa2pgidx(ssd, old_ppa);
-    uint64_t old_start_addr = mb + (old_physical_page_num * bytes_per_pages);
+    uint64_t old_start_addr = (uint64_t)mb + (old_physical_page_num * bytes_per_pages);
 
     for(int i=0; i<bytes_per_pages; i++){
         if(((char*)new_start_addr)[i] != ((char*)old_start_addr)[i]){
             printf("data move error, data incorrect\r\n");
         }
+    }
+    if(type){
+        struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
+        struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
+        if(lpn != old_OOB->LPA){
+            printf("gc type bug!\r\n");
+            while(1);
+        }
+        current_OOB->LPA = old_OOB->LPA;
+        current_OOB->P_PPA = old_ppa->ppa;
+        if(type == SET_RTT){
+            current_OOB->Timestamp = old_OOB->Timestamp;
+            current_OOB->RIP = old_OOB->RIP;
+        }
+        else if(type == SET_TIME){
+            current_OOB->Timestamp = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);;
+            old_OOB->RIP = 1;
+        }
+        set_RTTbit(ssd, &new_ppa);
+        clr_RTTbit(ssd, old_ppa);
     }
 
     /* update maptbl */
@@ -801,9 +826,30 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
             char *data = g_malloc0(page_size);
             gc_read_page(ssd, ppa, data, mb);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa, data, mb);
+            gc_write_page(ssd, ppa, data, mb, NORMAL);
             g_free(data);
             cnt++;
+        }
+        else if(pg_iter->status == PG_INVALID){
+            uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+            bool curr_RTT = ssd->RTTtbl[physical_page_num];
+            if(curr_RTT){
+                struct FG_OOB curr_pg_OOB = ssd->OOB[physical_page_num];
+                if(curr_pg_OOB.RIP){
+                    char *data = g_malloc0(page_size);
+                    gc_read_page(ssd, ppa, data, mb);
+                    /* delay the maptbl update until "write" happens */
+                    gc_write_page(ssd, ppa, data, mb, SET_RTT);
+                    g_free(data);
+                }
+                else{
+                    char *data = g_malloc0(page_size);
+                    gc_read_page(ssd, ppa, data, mb);
+                    /* delay the maptbl update until "write" happens */
+                    gc_write_page(ssd, ppa, data, mb, SET_TIME);
+                    g_free(data);
+                }
+            }
         }
     }
 
@@ -911,24 +957,31 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             printf("[ERROR] in dram backend rw\r\n");
             break;
         }
-        uint64_t physical_page_num = 0xFFFFFFFFFFFFFFFF;
+
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
         ppa = get_maptbl_ent(ssd, lpn);
         if (is_write) {
             char* rmw_R_buf = g_malloc0(bytes_per_pages);
             char* rmw_W_buf = g_malloc0(bytes_per_pages);
-
-            if (mapped_ppa(&ppa)) {
+            if (!rmw_R_buf || !rmw_W_buf) {
+                if (rmw_R_buf) g_free(rmw_R_buf);
+                if (rmw_W_buf) g_free(rmw_W_buf);
+                return -1;  // 返回錯誤碼
+            }
+            struct ppa old_ppa;
+            old_ppa.ppa = ppa.ppa;
+            
+            if (mapped_ppa(&old_ppa)) {
                 // read modify write
-                physical_page_num = ppa2pgidx(ssd, &ppa);
+                uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
                 for(int i=0; i<bytes_per_pages; i++){
-                    rmw_R_buf[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
+                    rmw_R_buf[i] = ((char*)(mb + (old_physical_page_num * bytes_per_pages)))[i];
                 }
 
                 /* update old page information first */
-                mark_page_invalid(ssd, &ppa);
-                set_rmap_ent(ssd, INVALID_LPN, &ppa);
+                mark_page_invalid(ssd, &old_ppa);
+                set_rmap_ent(ssd, INVALID_LPN, &old_ppa);
             }
             
             ppa = get_new_page(ssd);
@@ -962,7 +1015,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             }
             struct FG_OOB *current_OOB = &(ssd->OOB[physical_page_num]);
             current_OOB->LPA = lpn;
-            current_OOB->P_PPA = physical_page_num;
+            current_OOB->P_PPA = old_ppa.ppa;
             current_OOB->Timestamp = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
             struct nand_cmd swr;

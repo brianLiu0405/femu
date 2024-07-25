@@ -6,6 +6,7 @@
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
+#define INVALID_TIME    (~(0ULL))
 
 // [Brian] modify
 #define OUT_OF_BOND_SPACE_SIZE_PER_PAGE  32
@@ -47,6 +48,11 @@ enum {
     FEMU_DISABLE_LOG = 7,
 };
 
+enum {
+    NORMAL = 0,
+    SET_RTT = 1,
+    SET_TIME = 2,
+};
 
 #define BLK_BITS    (16)
 #define PG_BITS     (16)
