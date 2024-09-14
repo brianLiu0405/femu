@@ -1360,7 +1360,7 @@ typedef struct FemuCtrl {
     uint8_t         flash_type;
 
     // [Brian] modify
-    bool sec_erase;
+    int sec_erase;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {
