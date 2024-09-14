@@ -154,6 +154,9 @@ struct ssdparams {
     int blks_per_ch;  /* # of blocks per channel */
     int tt_blks;      /* total # of blocks in the SSD */
 
+    // [Brian] add tatol logic pages
+    int logic_ttpgs;  /* total # of logic pages in the SSD */
+
     int secs_per_line;
     int pgs_per_line;
     int blks_per_line;
@@ -206,7 +209,7 @@ struct nand_cmd {
 struct FG_OOB {
     uint64_t LPA;
     uint64_t P_PPA;
-    uint64_t Timestamp;
+    int64_t Timestamp;
     uint32_t RIP;
     uint32_t rsv;
 };
@@ -219,6 +222,7 @@ struct ssd {
     
     // [Brian] modify
     bool *RTTtbl; /* read track bitmap */
+    bool *OVWtbl; /* overwrite  bitmap */
     struct FG_OOB *OOB; /* out of bond space (size define OUT_OF_BOND_SPACE_SIZE_PER_PAGE)*/
 
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */

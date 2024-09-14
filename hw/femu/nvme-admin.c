@@ -988,7 +988,10 @@ static uint16_t nvme_format_namespace(FemuCtrl *n, NvmeNamespace *ns, uint8_t lb
     ns->ns_blks = ns_blks(ns, lba_idx);
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
-    if(sec_erase == 0x2) n->sec_erase = true;
+    printf("sec_erase = %d\r\n", sec_erase);
+    if(sec_erase == 0x2) n->sec_erase = 1;
+    else if(sec_erase == 0x4) n->sec_erase = 3;
+    else if(sec_erase == 0x6) n->sec_erase = 4;
     return NVME_SUCCESS;
 }
 

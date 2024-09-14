@@ -1,7 +1,7 @@
 #include "../nvme.h"
 #include "ftl.h"
 #define FEMU_DEBUG_FTL
-#define PRINT_READ_WRITE
+// #define PRINT_READ_WRITE
 // #define RW_DEBUG
 #define MODIFY
 // #define THREAD
@@ -25,7 +25,7 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
-    ftl_assert(lpn < ssd->sp.tt_pgs);
+    ftl_assert(lpn < ssd->sp.spp->logic_ttpgs);
     ssd->maptbl[lpn] = *ppa;
 }
 
@@ -45,16 +45,53 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
     return pgidx;
 }
 
+static struct ppa pgidx2ppa(struct ssd *ssd, uint64_t idx)
+{
+    struct ppa ppa;
+    struct ssdparams *spp = &ssd->sp;
+
+    ppa.g.pg = idx % spp->pgs_per_blk;
+    idx /= spp->pgs_per_blk;
+    ppa.g.blk = idx % spp->blks_per_pl;
+    idx /= spp->blks_per_pl;
+    ppa.g.pl = idx % spp->pls_per_lun;
+    idx /= spp->pls_per_lun;
+    ppa.g.lun = idx % spp->luns_per_ch;
+    idx /= spp->luns_per_ch;
+    ppa.g.ch = idx;
+
+    uint64_t pgidx = ppa2pgidx(ssd, &ppa);
+    ftl_assert(pgidx == idx);
+
+    return ppa;
+}
+
 
 // [Brian] modify
+static inline void set_OVWbit(struct ssd *ssd, struct ppa *ppa)
+{
+    // printf("set OVW bit\r\n");
+    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    ssd->OVWtbl[physical_page_num] = 1;
+}
+
+static inline void clr_OVWbit(struct ssd *ssd, struct ppa *ppa)
+{
+    // printf("clr OVW bit\r\n");
+    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    ssd->OVWtbl[physical_page_num] = 0;
+}
+
 static inline void set_RTTbit(struct ssd *ssd, struct ppa *ppa)
 {
+    // printf("set RTT bit\r\n");
     uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
     ssd->RTTtbl[physical_page_num] = 1;
 }
 
 static inline void clr_RTTbit(struct ssd *ssd, struct ppa *ppa)
 {
+    // printf("clr RTT bit\r\n");
     uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
     ssd->RTTtbl[physical_page_num] = 0;
 }
@@ -389,13 +426,23 @@ static void ssd_init_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->logic_ttpgs);
+    for (int i = 0; i < spp->logic_ttpgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
     }
 }
 
 // [Brian] modify
+static void ssd_init_OVW(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    ssd->OVWtbl = g_malloc0(spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        ssd->OVWtbl[i] = false;
+    }
+}
+
 static void ssd_init_RTT(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -440,6 +487,9 @@ void ssd_init(FemuCtrl *n)
 
     ssd_init_params(spp, n);
 
+
+    spp->logic_ttpgs = n->memsz * (1024 / spp->secsz) * (1024 / spp->secs_per_pg);
+
     /* initialize ssd internal layout architecture */
     ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);
     for (int i = 0; i < spp->nchs; i++) {
@@ -452,6 +502,8 @@ void ssd_init(FemuCtrl *n)
     // [Brian] modify
     /* initialize RTT */
     ssd_init_RTT(ssd);
+    /* initialize OVW */
+    ssd_init_OVW(ssd);
     /* initialize OOB */
     ssd_init_OOB(ssd);
 
@@ -488,7 +540,7 @@ static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
 
 static inline bool valid_lpn(struct ssd *ssd, uint64_t lpn)
 {
-    return (lpn < ssd->sp.tt_pgs);
+    return (lpn < ssd->sp.logic_ttpgs);
 }
 
 static inline bool mapped_ppa(struct ppa *ppa)
@@ -753,6 +805,8 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
             current_OOB->Timestamp = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);;
             old_OOB->RIP = 1;
         }
+        set_OVWbit(ssd, &new_ppa);
+        clr_OVWbit(ssd, old_ppa);
         set_RTTbit(ssd, &new_ppa);
         clr_RTTbit(ssd, old_ppa);
     }
@@ -978,7 +1032,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                 for(int i=0; i<bytes_per_pages; i++){
                     rmw_R_buf[i] = ((char*)(mb + (old_physical_page_num * bytes_per_pages)))[i];
                 }
-
+                set_OVWbit(ssd, &old_ppa);
                 /* update old page information first */
                 mark_page_invalid(ssd, &old_ppa);
                 set_rmap_ent(ssd, INVALID_LPN, &old_ppa);
@@ -1190,7 +1244,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
 }
 
 static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
-
+    printf("secure_erase \r\n");
     void *mb = n->mbe->logical_space;
 
     // clean current line
@@ -1212,12 +1266,141 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
                         for(int i=0; i<bytes_per_pages; i++){
                             ((char*)(mb + (physical_page_num * bytes_per_pages)))[i] = 0;
                         }
+                        struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+                        old_OOB->LPA = INVALID_LPN;
+                        old_OOB->P_PPA = INVALID_PPA;
+                        old_OOB->Timestamp = INVALID_TIME;
+                        old_OOB->RIP = 0;
                     }
                 }
             }
         }
     }
-    n->sec_erase = false;
+    n->sec_erase = 0;
+    return 0;
+}
+
+static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
+    printf("recovery \r\n");
+    struct ssdparams *spp = &ssd->sp;
+    bool *modified = g_malloc0(spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        if(ssd->RTTtbl[i] == 1){
+            // printf("RTT %d \r\n", i);
+            struct ppa ppa = pgidx2ppa(ssd, i);
+            // uint64_t lpn = get_rmap_ent(ssd, &ppa);
+            uint64_t lpn = ssd->OOB[i].LPA;
+            struct ppa now_ppa = get_maptbl_ent(ssd, lpn);
+            modified[now_ppa.ppa] = 1;
+            // uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+            // uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
+
+            if(ssd->OOB[i].LPA != INVALID_LPN && now_ppa.ppa != INVALID_PPA){
+                uint64_t now_physical_page_num = ppa2pgidx(ssd, &now_ppa);
+                if(ppa.ppa != now_ppa.ppa){
+                    printf("got it\r\n");
+                    printf("ppa %d, %lu\r\n", i, now_physical_page_num);
+                    printf("timestamp %lu, %lu\r\n", ssd->OOB[i].Timestamp, ssd->OOB[now_physical_page_num].Timestamp);
+                    if(!modified[ppa.ppa]){
+                        if(ssd->OOB[i].Timestamp < ssd->OOB[now_physical_page_num].Timestamp){
+                            printf("swap\r\n");
+                            /* update maptbl */
+                            set_maptbl_ent(ssd, lpn, &ppa);
+                            // /* update rmap */
+                            // set_rmap_ent(ssd, lpn, &ppa);
+                        }
+                    }
+                }
+                // uint64_t now_physical_page_num = ppa2pgidx(ssd, &now_ppa);
+                // printf("ppa %llu \r\n", ppa.ppa);
+                // printf("check timestamp\r\n");
+                // printf("timestamp %llu, %llu\r\n", ssd->OOB[i].Timestamp, ssd->OOB[now_physical_page_num].Timestamp);
+                // if(ssd->OOB[i].Timestamp < ssd->OOB[now_physical_page_num].Timestamp){
+                //     printf("swap\r\n");
+                //     /* update maptbl */
+                //     set_maptbl_ent(ssd, lpn, &ppa);
+                //     /* update rmap */
+                //     set_rmap_ent(ssd, lpn, &ppa);
+                // }
+            }
+        }
+    }
+    n->sec_erase = 0;
+    return 0;
+}
+
+static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
+    printf("dump disk\r\n");
+
+    void *mb = n->mbe->logical_space;
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
+
+    char file_name[32];
+    sprintf(file_name, "mySSD/L2P");  // Use .bin for binary files
+    FILE *file = fopen(file_name, "wb+");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+        return 1;
+    }
+    for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
+        struct ppa ppa = get_maptbl_ent(ssd, logic);
+        if (ppa.ppa != INVALID_PPA) {
+            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d\n", 
+                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);
+        }
+        else{
+            fprintf(file, "logic %d: physical %d\n", logic, -1);
+        }
+    }
+    fclose(file);
+
+    printf("spp->logic_ttpgs %d\r\n", spp->logic_ttpgs);
+    for (int physical_page_num = 0; physical_page_num < spp->tt_pgs; physical_page_num++) {
+                
+        struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
+
+        char file_name[255];
+        sprintf(file_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+                int fd = open(file_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd == -1) {
+            perror("file open fail");
+            return 1;
+        }
+        
+        // Calculate the offset for the current page
+        void *ram_data = mb + (physical_page_num * bytes_per_pages);
+        char *page_data = g_malloc0(bytes_per_pages);
+
+        // crash in 524288 -> 2G
+        for(int i=0; i<bytes_per_pages; i++){
+            page_data[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
+        }
+
+        printf("physical_page_num %lu \r\n", (uint64_t)physical_page_num);
+        // Debug print to check the page_data pointer
+        // printf("page_data %lu\r\n", (uint64_t)page_data);
+        
+        // Write the binary data of the page to the file
+        ssize_t written = write(fd, page_data, bytes_per_pages);
+        // printf("written %lu bytes\r\n", (uint64_t)written);
+
+                g_free(page_data);
+                // Check if the correct number of bytes was written
+        if (written != (ssize_t)bytes_per_pages) {
+            printf("written %lu \r\n", (uint64_t)written);
+            perror("file write fail");
+            close(fd);  // Close the file descriptor
+            n->sec_erase = 0;
+            return 1;
+        }
+
+        close(fd);  // Close the file descriptor after writing
+    }
+
+    printf("\r\nwrite file successful\r\n");
+    
+    n->sec_erase = 0;
     return 0;
 }
 
@@ -1241,7 +1424,9 @@ static void *ftl_thread(void *arg)
     ssd->to_poller = n->to_poller;
 
     while (1) {
-        if(n->sec_erase) ssd_secure_erase(ssd, n);
+        if(n->sec_erase == 1) ssd_secure_erase(ssd, n);
+        else if(n->sec_erase == 3) do_recovery(ssd, n);
+        else if(n->sec_erase == 4) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
