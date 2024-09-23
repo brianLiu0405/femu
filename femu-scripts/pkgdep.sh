@@ -12,6 +12,9 @@ if [[ -f /etc/debian_version ]]; then
 	# Additional dependencies
 	apt-get install -y libnuma-dev
     apt-get install -y ninja-build
+
+    # For python read NAND flash physical data tool - python3 & tkinter
+    apt-get install -y python3 python3-tk 
 else
     echo "pkgdep: unsupported system type ($SYSTEM), please install QEMU depencies manually"
 	exit 1

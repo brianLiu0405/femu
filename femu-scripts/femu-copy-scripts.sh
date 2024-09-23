@@ -4,7 +4,7 @@
 
 FSD="../femu-scripts"
 
-CPL=(pkgdep.sh femu-compile.sh run-whitebox.sh run-blackbox.sh run-nossd.sh run-zns.sh pin.sh ftk)
+CPL=(pkgdep.sh femu-compile.sh run-whitebox.sh run-blackbox.sh run-nossd.sh run-zns.sh pin.sh gen.sh ftk)
 
 echo ""
 echo "==> Copying following FEMU script to current directory:"
@@ -16,6 +16,9 @@ do
 	fi
 	cp -r $FSD/$f . && echo "    --> $f"
 done
+cp -r ../mySSD . && echo "    --> mySSD"
+echo "create physical nand file"
+./gen.sh
 echo "Done!"
 echo ""
 

@@ -13,7 +13,7 @@ for ch in $(seq 0 $((nchs - 1))); do
         for pl in $(seq 0 $((pls_per_lun - 1))); do
             for blk in $(seq 0 $((blks_per_pl - 1))); do
                 # Directory path
-                dir_path="build-femu/mySSD/ch${ch}/lun${lun}/pl${pl}/blk${blk}"
+                dir_path="mySSD/ch${ch}/lun${lun}/pl${pl}/blk${blk}"
                 
                 # Create the directory if it doesn't exist
                 mkdir -p "$dir_path"
