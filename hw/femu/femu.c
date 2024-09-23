@@ -73,7 +73,7 @@ static int nvme_start_ctrl(FemuCtrl *n)
                  1, NVME_Q_PRIO_HIGH, 1);
 
     // [Brian] modify
-    n->sec_erase = false;
+    n->sec_erase = 127;
 
     /* Currently only used by FEMU ZNS extension */
     if (n->ext_ops.start_ctrl) {
