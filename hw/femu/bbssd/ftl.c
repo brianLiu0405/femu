@@ -1,10 +1,11 @@
 #include "../nvme.h"
 #include "ftl.h"
 #define FEMU_DEBUG_FTL
-// #define PRINT_READ_WRITE
-// #define RW_DEBUG
+#define PRINT_READ_WRITE
+#define RW_DEBUG
 #define MODIFY
 // #define THREAD
+#define THREAD_NUM 4
 
 static void *ftl_thread(void *arg);
 
@@ -968,22 +969,23 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
 
 int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, bool is_write, struct ssd *ssd, uint64_t *maxlat)
 {
-    QEMUSGList *qsg = &req->qsg;
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = lbal[0];
     void *mb = b->logical_space;
+
+    DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
+
+    QEMUSGList *qsg = &req->qsg;
     uint64_t lba = mb_oft / 512;
-    int len_by_lba = qsg->nsg * 8;
     uint64_t start_lpn = lba / ssd->sp.secs_per_pg;
-    uint64_t end_lpn = (lba + len_by_lba - 1) / ssd->sp.secs_per_pg;
+    uint64_t end_lpn = start_lpn + qsg->nsg - 1;
     struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0;
     uint64_t sublat = 0;
     int r;
-    DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
 
     if (is_write) {
@@ -997,6 +999,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
         }
     }
 
+
     #ifdef RW_DEBUG
     printf("qsg->nsg: %d\r\n", qsg->nsg);
     printf("backend_rw_from_flash: lpn_S %lu, lpn_E %lu\r\n", start_lpn, end_lpn);
@@ -1005,12 +1008,13 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
     for (lpn = start_lpn; lpn <= end_lpn; lpn++){
         #ifdef RW_DEBUG
         printf("logic page number: %lu\r\n", lpn);
-        #endif
-
+        
+        #else
         if(sg_cur_index >= qsg->nsg){
             printf("[ERROR] in dram backend rw\r\n");
             break;
         }
+        #endif
 
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
@@ -1276,24 +1280,31 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
             }
         }
     }
-    n->sec_erase = 0;
+    n->sec_erase = 127;
     return 0;
 }
 
 static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
     printf("recovery \r\n");
     struct ssdparams *spp = &ssd->sp;
+    printf("DBG 1  \r\n");
     bool *modified = g_malloc0(spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    printf("DBG 2  \r\n");
+    for (size_t i = 0; i < spp->tt_pgs; i++) {
         if(ssd->RTTtbl[i] == 1){
-            // printf("RTT %d \r\n", i);
+            printf("RTT %d \r\n", i);
+            printf("DBG 3  \r\n");
             struct ppa ppa = pgidx2ppa(ssd, i);
             // uint64_t lpn = get_rmap_ent(ssd, &ppa);
+            printf("DBG 4  \r\n");
             uint64_t lpn = ssd->OOB[i].LPA;
+            printf("DBG 5  \r\n");
             struct ppa now_ppa = get_maptbl_ent(ssd, lpn);
+            printf("DBG 6  \r\n");
             modified[now_ppa.ppa] = 1;
             // uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
             // uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
+            printf("DBG 7  \r\n");
 
             if(ssd->OOB[i].LPA != INVALID_LPN && now_ppa.ppa != INVALID_PPA){
                 uint64_t now_physical_page_num = ppa2pgidx(ssd, &now_ppa);
@@ -1325,20 +1336,68 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
             }
         }
     }
-    n->sec_erase = 0;
+    n->sec_erase = 127;
     return 0;
 }
 
-static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
-    printf("dump disk\r\n");
+struct SsdMbPackage {
+    FemuCtrl *n;
+    struct ssd *ssd;
+    char *mb;
+    int id;
+};
 
-    void *mb = n->mbe->logical_space;
-    struct ssdparams *spp = &ssd->sp;
+static void *worker(void *arg)
+{
+    struct SsdMbPackage *pkg = (struct SsdMbPackage *)arg;
+    FemuCtrl *n = pkg->n;
+    struct ssd *ssd = pkg->ssd;
+    char *mb = pkg->mb;
+    int id = pkg->id;
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
+    for (size_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
+        printf("physical_page_num %lu \r\n", physical_page_num);
+        struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
+
+        char file_name[255];
+        sprintf(file_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+        int fd = open(file_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd == -1) {
+            perror("file open fail");
+            return 1;
+        }
+        
+        // Calculate the offset for the current page
+        char *ram_data = mb + (physical_page_num * bytes_per_pages);
+        char *page_data = g_malloc0(bytes_per_pages);
+
+        for(int i=0; i<bytes_per_pages; i++){
+            page_data[i] = ram_data[i];
+        }
+        
+        size_t written = write(fd, page_data, bytes_per_pages);
+
+        g_free(page_data);
+
+        if (written != (size_t)bytes_per_pages) {
+            printf("written %lu \r\n", (uint64_t)written);
+            perror("file write fail");
+            close(fd);  // Close the file descriptor
+            n->sec_erase = 127;
+            return 1;
+        }
+
+        close(fd);  // Close the file descriptor after writing
+    }
+}
+
+static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
+    printf("dump p2l\r\n");
+    struct ssdparams *spp = &ssd->sp;
 
     char file_name[32];
     sprintf(file_name, "mySSD/L2P");  // Use .bin for binary files
-    FILE *file = fopen(file_name, "wb+");  // Open the file in binary write mode
+    FILE *file = fopen(file_name, "wb");  // Open the file in binary write mode
     if (!file) {
         perror("file open fail");
         return 1;
@@ -1354,53 +1413,54 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
         }
     }
     fclose(file);
+    n->sec_erase = 127;
+    return 0;
+}
 
-    printf("spp->logic_ttpgs %d\r\n", spp->logic_ttpgs);
-    for (int physical_page_num = 0; physical_page_num < spp->tt_pgs; physical_page_num++) {
-                
-        struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
+static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
+    printf("dump disk\r\n");
 
-        char file_name[255];
-        sprintf(file_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
-                int fd = open(file_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1) {
-            perror("file open fail");
-            return 1;
+    char *mb = (char*) n->mbe->logical_space;
+    struct ssdparams *spp = &ssd->sp;
+
+    char file_name[32];
+    sprintf(file_name, "mySSD/L2P");  // Use .bin for binary files
+    FILE *file = fopen(file_name, "wb");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+        return 1;
+    }
+    for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
+        struct ppa ppa = get_maptbl_ent(ssd, logic);
+        if (ppa.ppa != INVALID_PPA) {
+            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d\n", 
+                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);
         }
-        
-        // Calculate the offset for the current page
-        void *ram_data = mb + (physical_page_num * bytes_per_pages);
-        char *page_data = g_malloc0(bytes_per_pages);
-
-        // crash in 524288 -> 2G
-        for(int i=0; i<bytes_per_pages; i++){
-            page_data[i] = ((char*)(mb + (physical_page_num * bytes_per_pages)))[i];
+        else{
+            fprintf(file, "logic %d: physical %d\n", logic, -1);
         }
+    }
+    fclose(file);
+    
+    QemuThread threads[THREAD_NUM];
+    struct SsdMbPackage thread_ids[THREAD_NUM];
 
-        printf("physical_page_num %lu \r\n", (uint64_t)physical_page_num);
-        // Debug print to check the page_data pointer
-        // printf("page_data %lu\r\n", (uint64_t)page_data);
-        
-        // Write the binary data of the page to the file
-        ssize_t written = write(fd, page_data, bytes_per_pages);
-        // printf("written %lu bytes\r\n", (uint64_t)written);
-
-                g_free(page_data);
-                // Check if the correct number of bytes was written
-        if (written != (ssize_t)bytes_per_pages) {
-            printf("written %lu \r\n", (uint64_t)written);
-            perror("file write fail");
-            close(fd);  // Close the file descriptor
-            n->sec_erase = 0;
-            return 1;
-        }
-
-        close(fd);  // Close the file descriptor after writing
+     for (int i = 0; i < THREAD_NUM; i++) {
+        thread_ids[i].id = i;
+        thread_ids[i].mb = mb;
+        thread_ids[i].ssd = ssd;
+        thread_ids[i].n = n;
+        qemu_thread_create(&threads[i], "worker", worker, &thread_ids[i], QEMU_THREAD_JOINABLE);
     }
 
+    // 等待所有執行緒完成
+    for (int i = 0; i < THREAD_NUM; i++) {
+        qemu_thread_join(&threads[i]);
+    }
+    
     printf("\r\nwrite file successful\r\n");
     
-    n->sec_erase = 0;
+    n->sec_erase = 127;
     return 0;
 }
 
@@ -1424,9 +1484,10 @@ static void *ftl_thread(void *arg)
     ssd->to_poller = n->to_poller;
 
     while (1) {
+        if(n->sec_erase == 0) dump_p2l(ssd, n);
         if(n->sec_erase == 1) ssd_secure_erase(ssd, n);
-        else if(n->sec_erase == 3) do_recovery(ssd, n);
-        else if(n->sec_erase == 4) dump(ssd, n);
+        else if(n->sec_erase == 2) do_recovery(ssd, n);
+        else if(n->sec_erase == 3) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
