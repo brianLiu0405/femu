@@ -4,7 +4,7 @@
 pgs_per_blk=256   # Number of pages per flash block
 blks_per_pl=256   # Number of blocks per plane
 pls_per_lun=1     # Number of planes per LUN (keep it at one, no multiplanes support)
-luns_per_ch=8     # Number of LUNs per channel
+luns_per_ch=4     # Number of LUNs per channel
 nchs=8            # Number of channels
 
 # Create directory structure
