@@ -1357,7 +1357,7 @@ static void *worker(void *arg)
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
     printf("id %d \r\n", id);
     for (size_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
-        printf("%lu. \r\n", physical_page_num);
+        printf("physical_page_num %lu \r\n", physical_page_num);
         struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
 
         char file_name[255];
