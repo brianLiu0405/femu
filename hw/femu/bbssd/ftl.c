@@ -1355,8 +1355,9 @@ static void *worker(void *arg)
     char *mb = pkg->mb;
     int id = pkg->id;
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
-    for (size_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
-        printf("physical_page_num %lu \r\n", physical_page_num);
+    printf("id %d \r\n", id);
+    for (size_t physical_page_num = id; physical_page_num < 100; physical_page_num += 4) {
+        printf("%lu. \r\n", physical_page_num);
         struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
 
         char file_name[255];
@@ -1369,16 +1370,7 @@ static void *worker(void *arg)
         
         // Calculate the offset for the current page
         char *ram_data = mb + (physical_page_num * bytes_per_pages);
-        char *page_data = g_malloc0(bytes_per_pages);
-
-        for(int i=0; i<bytes_per_pages; i++){
-            page_data[i] = ram_data[i];
-        }
-        
-        size_t written = write(fd, page_data, bytes_per_pages);
-
-        g_free(page_data);
-
+        size_t written = write(fd, ram_data, bytes_per_pages);
         if (written != (size_t)bytes_per_pages) {
             printf("written %lu \r\n", (uint64_t)written);
             perror("file write fail");
