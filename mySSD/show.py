@@ -6,6 +6,12 @@ import os
 
 class HexAsciiViewer:
     def __init__(self, master):
+        self.ch = 0
+        self.lun = 0
+        self.plane = 0
+        self.block = 0
+        self.page = 0
+
         self.master = master
         
         self.file_path = ''
@@ -103,24 +109,24 @@ class HexAsciiViewer:
                         lines = content.splitlines()
                         for line in lines:
                             if line.startswith("nchs"):
-                                ch = int(line.split("=")[1])
+                                self.ch = int(line.split("=")[1])
                             elif line.startswith("luns_per_ch"):
-                                lun = int(line.split("=")[1])
+                                self.lun = int(line.split("=")[1])
                             elif line.startswith("pls_per_lun"):
-                                plane = int(line.split("=")[1])
+                                self.plane = int(line.split("=")[1])
                             elif line.startswith("blks_per_pl"):
-                                block = int(line.split("=")[1])
+                                self.block = int(line.split("=")[1])
                             elif line.startswith("pgs_per_blk"):
-                                page = int(line.split("=")[1])
+                                self.page = int(line.split("=")[1])
 
             if find == 0:
                 print("ERROR: param.ini not found in the selected folder")
 
-        ch_list = [str(i) for i in range(ch)]
-        lun_list = [str(i) for i in range(lun)]
-        plane_list = [str(i) for i in range(plane)]
-        block_list = [str(i) for i in range(block)]
-        page_list = [str(i) for i in range(page)]
+        ch_list = [str(i) for i in range(self.ch)]
+        lun_list = [str(i) for i in range(self.lun)]
+        plane_list = [str(i) for i in range(self.plane)]
+        block_list = [str(i) for i in range(self.block)]
+        page_list = [str(i) for i in range(self.page)]
 
         self.ch_combo['values'] = ch_list
         self.lun_combo['values'] = lun_list
@@ -145,14 +151,46 @@ class HexAsciiViewer:
         self.hex_text.config(state=tk.NORMAL)
         self.ascii_text.config(state=tk.NORMAL)
 
+        # struct FG_OOB {
+        #     uint64_t LPA;
+        #     uint64_t P_PPA;
+        #     int64_t Timestamp;
+        #     uint32_t RIP;
+        #     uint32_t rsv;
+        # };
         with open(os.path.join(self.file_path, 'ch'+ch_val, 'lun'+lun_val, 'pl'+plane_val, 'blk'+block_val, 'pg'+page_val), 'rb') as file:
-            content = file.read()
             hex_lines = []
             ascii_lines = []
             line_numbers_lines = []
-            for i in range(0, len(content), 16):
-                hex_chunk = ' '.join("{:02x}".format(b) for b in content[i:i+16])
-                ascii_chunk = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in content[i:i+16])
+            content = file.read()
+            OOB = content[:32]
+            data = content[32:]
+            LPA = int.from_bytes(OOB[:4], byteorder='little')
+            P_PPA = int.from_bytes(OOB[4:8], byteorder='little')
+            Timestamp = int.from_bytes(OOB[8:12], byteorder='little')
+            RIP = int.from_bytes(OOB[12:16], byteorder='little')
+
+            page = P_PPA % self.page
+            P_PPA //= self.page
+            block = P_PPA % self.block
+            P_PPA //= self.block
+            plane = P_PPA % self.plane
+            P_PPA //= self.plane
+            lun = P_PPA % self.lun
+            P_PPA //= self.lun
+            ch = P_PPA % self.ch
+            formatted_str = "LPA: %s, Timestamp: %d, RIP, %d" % (LPA, Timestamp, RIP)
+            hex_lines.append(formatted_str)
+            ascii_lines.append(formatted_str)
+            line_numbers_lines.append("")
+            formatted_str = "ch %d, lun %d, plane %d, block %d, page %d" % (ch, lun, plane, block, page)
+            hex_lines.append(formatted_str)
+            ascii_lines.append(formatted_str)
+            line_numbers_lines.append("")
+
+            for i in range(0, len(data), 16):
+                hex_chunk = ' '.join("{:02x}".format(b) for b in data[i:i+16])
+                ascii_chunk = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in data[i:i+16])
                 line_numbers_chunk = ''.join(str(i//16))
                 line_numbers_lines.append(line_numbers_chunk)
                 hex_lines.append(hex_chunk)
@@ -173,26 +211,29 @@ class HexAsciiViewer:
 
 def open_l2p():
     l2p_name = filedialog.askopenfilename()
-    l2p_window = Toplevel(root)
-    l2p_window.title("L2P")
-    l2p_window.geometry("600x1000")
+    if l2p_name:
     
-    l2p_table = tk.Text(l2p_window, wrap='word', height=10, width=40)
-    l2p_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        l2p_window = Toplevel(root)
+        l2p_window.title("L2P")
+        l2p_window.geometry("600x1000")
+        
+        l2p_table = tk.Text(l2p_window, wrap='word', height=10, width=40)
+        l2p_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    l2p_scrollbar = ttk.Scrollbar(l2p_window, orient="vertical", command=l2p_table.yview)
-    l2p_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        l2p_scrollbar = ttk.Scrollbar(l2p_window, orient="vertical", command=l2p_table.yview)
+        l2p_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    l2p_table.config(yscrollcommand=l2p_scrollbar.set)
-    
-    with open(l2p_name, 'r', encoding='utf-8') as file:
-        l2p_table.delete(1.0, tk.END)
-        for line in file:
-            l2p_table.insert(tk.END, line)
+        l2p_table.config(yscrollcommand=l2p_scrollbar.set)
+        
+        with open(l2p_name, 'r', encoding='utf-8') as file:
+            l2p_table.delete(1.0, tk.END)
+            for line in file:
+                l2p_table.insert(tk.END, line)
 
-    l2p_table.config(state=tk.DISABLED)
+        l2p_table.config(state=tk.DISABLED)
 
 if __name__ == "__main__":
     root = tk.Tk()
+    root.geometry("1920x1080")
     app = HexAsciiViewer(root)
     root.mainloop()
