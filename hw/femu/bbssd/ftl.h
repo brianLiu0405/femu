@@ -51,7 +51,7 @@ enum {
 enum {
     NORMAL = 0,
     SET_RTT = 1,
-    SET_TIME = 2,
+    SET_RIP = 2,
 };
 
 #define BLK_BITS    (16)
