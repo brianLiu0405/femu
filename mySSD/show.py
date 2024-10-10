@@ -165,20 +165,18 @@ class HexAsciiViewer:
             content = file.read()
             OOB = content[:32]
             data = content[32:]
-            LPA = int.from_bytes(OOB[:4], byteorder='little')
-            P_PPA = int.from_bytes(OOB[4:8], byteorder='little')
-            Timestamp = int.from_bytes(OOB[8:12], byteorder='little')
-            RIP = int.from_bytes(OOB[12:16], byteorder='little')
+            LPA = int.from_bytes(OOB[:8], byteorder='little')
+            P_PPA = OOB[8:16]
+            Timestamp = int.from_bytes(OOB[16:24], byteorder='little')
+            RIP = int.from_bytes(OOB[24:28], byteorder='little')
+            for i in P_PPA : print(i, " ")
+            
+            block = int.from_bytes(P_PPA[:2], byteorder='little')
+            page = int.from_bytes(P_PPA[2:4], byteorder='little')
+            plane = int.from_bytes(P_PPA[5:6], byteorder='little')
+            lun = int.from_bytes(P_PPA[6:7], byteorder='little')
+            ch = int.from_bytes(P_PPA[7:8], byteorder='little') & 0xFE
 
-            page = P_PPA % self.page
-            P_PPA //= self.page
-            block = P_PPA % self.block
-            P_PPA //= self.block
-            plane = P_PPA % self.plane
-            P_PPA //= self.plane
-            lun = P_PPA % self.lun
-            P_PPA //= self.lun
-            ch = P_PPA % self.ch
             formatted_str = "LPA: %s, Timestamp: %d, RIP, %d" % (LPA, Timestamp, RIP)
             hex_lines.append(formatted_str)
             ascii_lines.append(formatted_str)
