@@ -776,6 +776,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
         current_OOB->Timestamp = old_OOB->Timestamp;
         current_OOB->RIP = old_OOB->RIP;
         if(type == SET_RIP) current_OOB->RIP = 1;
+        set_rmap_ent(ssd, INVALID_LPN, &new_ppa);
         set_RTTbit(ssd, &new_ppa);
         mark_page_invalid(ssd, &new_ppa);
     }
@@ -1251,13 +1252,14 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
     return 0;
 }
 
-static void swap_in_l2p(struct ssd *ssd, uint64_t phy, uint64_t now_ppa_num, struct ppa iter_ppa, struct ppa now_ppa, char *check){ 
+static void swap_in_l2p(struct ssd *ssd, uint64_t phy, uint64_t now_ppa_num, struct ppa iter_ppa, struct ppa now_ppa, char *check, struct nand_page *pg_iter){ 
     if (ssd->OOB[phy].LPA == ssd->OOB[now_ppa_num].LPA) {
         set_rmap_ent(ssd, INVALID_LPN, &now_ppa);
         mark_page_invalid(ssd, &now_ppa);
         set_rmap_ent(ssd, ssd->OOB[phy].LPA, &iter_ppa);
         set_maptbl_ent(ssd, ssd->OOB[phy].LPA, &iter_ppa);
-        mark_page_valid(ssd, &iter_ppa);
+        // mark_page_valid(ssd, &iter_ppa);
+        pg_iter->status = PG_FREE;
         check[now_ppa_num] = 1;
     }
 }
@@ -1268,7 +1270,7 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
     struct ssdparams *spp = &ssd->sp;
     char *check = g_malloc0(spp->tt_pgs);
     for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
-        printf("phy %lu \r\n", phy);
+        // printf("phy %lu \r\n", phy);
         struct nand_page *pg_iter = NULL;
         if(!check[phy]){
             struct ppa iter_ppa = pgidx2ppa(ssd, phy);
@@ -1279,23 +1281,23 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
                 uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
                 if(ssd->OOB[phy].RIP){
                     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
-                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
                     }
                     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
-                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
                     }
                 }
                 else{
                     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
-                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
                     }
                     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
-                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
                     }
                 }
             }
-            check[phy] = 1;
         }
+        check[phy] = 1;
     }
     g_free(check);
 
@@ -1319,9 +1321,9 @@ static void *worker(void *arg)
     char *mb = pkg->mb;
     int id = pkg->id;
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
-    printf("id %d \r\n", id);
+    // printf("id %d \r\n", id);
     for (size_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
-        printf("physical_page_num %lu \r\n", physical_page_num);
+        // printf("physical_page_num %lu \r\n", physical_page_num);
         struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
 
         char file_name[255];
@@ -1375,6 +1377,15 @@ static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
     }
     fclose(file);
     n->sec_erase = 127;
+
+    
+    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+        if(ssd->OOB[phy].LPA == 256){
+            struct ppa twofivesix = pgidx2ppa(ssd, phy);
+            printf("ch %d, lun %d, plane %d, block %d, page %d -> time %ld\r\n", twofivesix.g.ch, twofivesix.g.lun, twofivesix.g.pl, twofivesix.g.blk, twofivesix.g.pg, ssd->OOB[phy].Timestamp);
+        }
+    }
+
     return 0;
 }
 
