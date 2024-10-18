@@ -13,8 +13,10 @@ if [[ -f /etc/debian_version ]]; then
 	apt-get install -y libnuma-dev
     apt-get install -y ninja-build
 
-    # For python read NAND flash physical data tool - python3 & tkinter
-    apt-get install -y python3 python3-tk 
+    apt-get install make
+    # For python read NAND flash physical data tool - python3 & tkinter, matplotlib
+    apt-get install -y python3 python3-tk
+    python3 -m pip install matplotlib
 else
     echo "pkgdep: unsupported system type ($SYSTEM), please install QEMU depencies manually"
 	exit 1
