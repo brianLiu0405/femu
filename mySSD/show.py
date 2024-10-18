@@ -3,6 +3,7 @@ from tkinter import ttk
 from tkinter import filedialog
 from tkinter import Toplevel
 import os
+from timeline import plot_logic_vs_timestamp
 
 class HexAsciiViewer:
     def __init__(self, master):
@@ -81,8 +82,11 @@ class HexAsciiViewer:
         self.read_button = tk.Button(self.file_control_frame, text="Read Page", command=self.read_page)
         self.read_button.pack()
 
-        open_l2p_button = tk.Button(root, text="Open L2P", command=open_l2p)
+        open_l2p_button = tk.Button(self.file_control_frame, text="Open L2P", command=self.open_l2p)
         open_l2p_button.pack()
+
+        open_time_button = tk.Button(self.file_control_frame, text="timeline", command=self.open_time)
+        open_time_button.pack()
 
     def sync_scroll(self, *args):
         # Synchronize scrollbars
@@ -169,7 +173,7 @@ class HexAsciiViewer:
             P_PPA = OOB[8:16]
             Timestamp = int.from_bytes(OOB[16:24], byteorder='little')
             RIP = int.from_bytes(OOB[24:28], byteorder='little')
-            for i in P_PPA : print(i, " ")
+            # for i in P_PPA : print(i, " ")
             
             block = int.from_bytes(P_PPA[:2], byteorder='little')
             page = int.from_bytes(P_PPA[2:4], byteorder='little')
@@ -206,29 +210,37 @@ class HexAsciiViewer:
         self.line_numbers.config(state=tk.DISABLED)
         self.hex_text.config(state=tk.DISABLED)
         self.ascii_text.config(state=tk.DISABLED)
-
-def open_l2p():
-    l2p_name = filedialog.askopenfilename()
-    if l2p_name:
     
-        l2p_window = Toplevel(root)
-        l2p_window.title("L2P")
-        l2p_window.geometry("600x1000")
+    def open_l2p(self):
+        l2p_name = filedialog.askopenfilename()
+        if l2p_name:
         
-        l2p_table = tk.Text(l2p_window, wrap='word', height=10, width=40)
-        l2p_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            l2p_window = Toplevel(root)
+            l2p_window.title("L2P")
+            l2p_window.geometry("600x1000")
+            
+            l2p_table = tk.Text(l2p_window, wrap='word', height=10, width=40)
+            l2p_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        l2p_scrollbar = ttk.Scrollbar(l2p_window, orient="vertical", command=l2p_table.yview)
-        l2p_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            l2p_scrollbar = ttk.Scrollbar(l2p_window, orient="vertical", command=l2p_table.yview)
+            l2p_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        l2p_table.config(yscrollcommand=l2p_scrollbar.set)
-        
-        with open(l2p_name, 'r', encoding='utf-8') as file:
-            l2p_table.delete(1.0, tk.END)
-            for line in file:
-                l2p_table.insert(tk.END, line)
+            l2p_table.config(yscrollcommand=l2p_scrollbar.set)
+            
+            with open(l2p_name, 'r', encoding='utf-8') as file:
+                l2p_table.delete(1.0, tk.END)
+                for line in file:
+                    l2p_table.insert(tk.END, line)
 
-        l2p_table.config(state=tk.DISABLED)
+            l2p_table.config(state=tk.DISABLED)
+
+    def open_time(self):
+        l2p_name = filedialog.askopenfilename()
+        plot_logic_vs_timestamp(l2p_name)
+
+    def open_time(self):
+        l2p_name = filedialog.askopenfilename()
+        plot_logic_vs_timestamp(l2p_name)
 
 if __name__ == "__main__":
     root = tk.Tk()
