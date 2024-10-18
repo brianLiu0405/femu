@@ -1306,6 +1306,75 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
     return 0;
 }
 
+static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
+    printf("recovery \r\n");
+    size_t target_lpa = 3327;
+    struct ppa cur_target_ppa = get_maptbl_ent(ssd, target_lpa);
+    uint64_t cur_target_ppa_num = ppa2pgidx(ssd, &cur_target_ppa);
+    int64_t cur_target_timestamp = ssd->OOB[cur_target_ppa_num].Timestamp; // assume this ransomware attack
+    /*     this is recover    */
+    struct ssdparams *spp = &ssd->sp;
+    char *check = g_malloc0(spp->tt_pgs);
+    int64_t original_delta = cur_target_timestamp;
+    uint64_t pre_ppa_num = 0;
+    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+        int64_t delta = ssd->OOB[phy].Timestamp - cur_target_timestamp;
+        if(delta != 0 && delta < original_delta) {
+            original_delta = delta;
+            pre_ppa_num = phy;
+        }
+    }
+
+    int64_t pre_ppa_timestamp = ssd->OOB[pre_ppa_num].Timestamp;
+    struct ppa pre_ppa = pgidx2ppa(ssd, pre_ppa_num);
+    printf("cur_target_ppa.g.ch %d, cur_target_ppa.g.lun %d, cur_target_ppa.g.pl %d, cur_target_ppa.g.blk %d, cur_target_ppa.g.pg %d\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg);
+    printf("pre_ppa.g.ch %d, pre_ppa.g.lun %d, pre_ppa.g.pl %d, pre_ppa.g.blk %d, pre_ppa.g.pg %d\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg);
+
+//TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
+   
+    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+        // printf("phy %lu \r\n", phy);
+        struct nand_page *pg_iter = NULL;
+        if(!check[phy]){
+            struct ppa iter_ppa = pgidx2ppa(ssd, phy);
+            pg_iter = get_pg(ssd, &iter_ppa);
+            if(ssd->RTTtbl[phy] == 1 && pg_iter->status == PG_INVALID){
+                uint64_t lpn_iter_ppa = ssd->OOB[phy].LPA;
+                struct ppa now_ppa = get_maptbl_ent(ssd, lpn_iter_ppa);
+                uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
+                // if(pre_ppa_timestamp > ssd->OOB[phy].Timestamp){
+                    if(abs(pre_ppa_timestamp - ssd->OOB[phy].Timestamp) < abs(pre_ppa_timestamp - ssd->OOB[now_ppa_num].Timestamp)){
+                        printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
+                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                    }
+                // }
+                // if(ssd->OOB[phy].RIP){
+                //     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
+                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                //     }
+                //     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
+                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                //     }
+                // }
+                // else{
+                //     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
+                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                //     }
+                //     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
+                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                //     }
+                // }
+            }
+        }
+        check[phy] = 1;
+    }
+    g_free(check);
+
+    printf("recovery done\r\n");
+    n->sec_erase = 127;
+    return 0;
+}
+
 struct SsdMbPackage {
     FemuCtrl *n;
     struct ssd *ssd;
@@ -1354,12 +1423,13 @@ static void *worker(void *arg)
     }
 }
 
+int p2l_file_num = 0;
 static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
     printf("dump p2l\r\n");
     struct ssdparams *spp = &ssd->sp;
 
     char file_name[32];
-    sprintf(file_name, "mySSD/L2P");  // Use .bin for binary files
+    sprintf(file_name, "mySSD/L2P_%d", p2l_file_num++);  // Use .bin for binary files
     FILE *file = fopen(file_name, "wb");  // Open the file in binary write mode
     if (!file) {
         perror("file open fail");
@@ -1368,8 +1438,8 @@ static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
     for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
         struct ppa ppa = get_maptbl_ent(ssd, logic);
         if (ppa.ppa != INVALID_PPA) {
-            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d\n", 
-                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);
+            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d, timestamp %lu\n", 
+                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg, ssd->OOB[ppa2pgidx(ssd, &ppa)].Timestamp);
         }
         else{
             fprintf(file, "logic %d: physical %d\n", logic, -1);
@@ -1380,7 +1450,7 @@ static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
 
     
     for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
-        if(ssd->OOB[phy].LPA == 256){
+        if(ssd->OOB[phy].LPA == 3327){
             struct ppa twofivesix = pgidx2ppa(ssd, phy);
             printf("ch %d, lun %d, plane %d, block %d, page %d -> time %ld\r\n", twofivesix.g.ch, twofivesix.g.lun, twofivesix.g.pl, twofivesix.g.blk, twofivesix.g.pg, ssd->OOB[phy].Timestamp);
         }
@@ -1405,8 +1475,8 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
         struct ppa ppa = get_maptbl_ent(ssd, logic);
         if (ppa.ppa != INVALID_PPA) {
-            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d\n", 
-                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);
+            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d, timestamp %lu\n", 
+                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg, ssd->OOB[ppa2pgidx(ssd, &ppa)].Timestamp);
         }
         else{
             fprintf(file, "logic %d: physical %d\n", logic, -1);
@@ -1458,7 +1528,7 @@ static void *ftl_thread(void *arg)
     while (1) {
         if(n->sec_erase == 0) dump_p2l(ssd, n);
         if(n->sec_erase == 1) ssd_secure_erase(ssd, n);
-        else if(n->sec_erase == 2) do_recovery(ssd, n);
+        else if(n->sec_erase == 2) do_recovery_new_version(ssd, n);
         else if(n->sec_erase == 3) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
