@@ -1318,17 +1318,19 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
     int64_t original_delta = cur_target_timestamp;
     uint64_t pre_ppa_num = 0;
     for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
-        int64_t delta = ssd->OOB[phy].Timestamp - cur_target_timestamp;
-        if(delta != 0 && delta < original_delta) {
-            original_delta = delta;
-            pre_ppa_num = phy;
+        if(ssd->OOB[phy].LPA == target_lpa){
+            int64_t delta = ssd->OOB[phy].Timestamp - cur_target_timestamp;
+            if(delta != 0 && delta < original_delta) {
+                original_delta = delta;
+                pre_ppa_num = phy;
+            }
         }
     }
 
     int64_t pre_ppa_timestamp = ssd->OOB[pre_ppa_num].Timestamp;
     struct ppa pre_ppa = pgidx2ppa(ssd, pre_ppa_num);
-    printf("cur_target_ppa.g.ch %d, cur_target_ppa.g.lun %d, cur_target_ppa.g.pl %d, cur_target_ppa.g.blk %d, cur_target_ppa.g.pg %d\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg);
-    printf("pre_ppa.g.ch %d, pre_ppa.g.lun %d, pre_ppa.g.pl %d, pre_ppa.g.blk %d, pre_ppa.g.pg %d\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg);
+    printf("cur_target_ppa  ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg, cur_target_timestamp);
+    printf("pre_ppa         ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg, pre_ppa_timestamp);
 
 //TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
    
@@ -1343,11 +1345,12 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
                 struct ppa now_ppa = get_maptbl_ent(ssd, lpn_iter_ppa);
                 uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
                 // if(pre_ppa_timestamp > ssd->OOB[phy].Timestamp){
-                    if(abs(pre_ppa_timestamp - ssd->OOB[phy].Timestamp) < abs(pre_ppa_timestamp - ssd->OOB[now_ppa_num].Timestamp)){
-                        printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
-                        swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
-                    }
+                if(abs(pre_ppa_timestamp - ssd->OOB[phy].Timestamp) < abs(pre_ppa_timestamp - ssd->OOB[now_ppa_num].Timestamp)){
+                    printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
+                    swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
+                }
                 // }
+
                 // if(ssd->OOB[phy].RIP){
                 //     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
                 //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
@@ -1528,7 +1531,10 @@ static void *ftl_thread(void *arg)
     while (1) {
         if(n->sec_erase == 0) dump_p2l(ssd, n);
         if(n->sec_erase == 1) ssd_secure_erase(ssd, n);
-        else if(n->sec_erase == 2) do_recovery_new_version(ssd, n);
+        else if(n->sec_erase == 2) {
+            // do_recovery(ssd, n);
+            do_recovery_new_version(ssd, n);
+        }
         else if(n->sec_erase == 3) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
