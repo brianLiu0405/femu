@@ -1269,7 +1269,7 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
     /*     this is recover    */
     struct ssdparams *spp = &ssd->sp;
     char *check = g_malloc0(spp->tt_pgs);
-    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
         // printf("phy %lu \r\n", phy);
         struct nand_page *pg_iter = NULL;
         if(!check[phy]){
@@ -1308,7 +1308,7 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
 
 static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
     printf("recovery \r\n");
-    size_t target_lpa = 3327;
+    uint64_t target_lpa = 3327;
     struct ppa cur_target_ppa = get_maptbl_ent(ssd, target_lpa);
     uint64_t cur_target_ppa_num = ppa2pgidx(ssd, &cur_target_ppa);
     int64_t cur_target_timestamp = ssd->OOB[cur_target_ppa_num].Timestamp; // assume this ransomware attack
@@ -1317,7 +1317,7 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
     char *check = g_malloc0(spp->tt_pgs);
     int64_t original_delta = cur_target_timestamp;
     uint64_t pre_ppa_num = 0;
-    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
         if(ssd->OOB[phy].LPA == target_lpa){
             int64_t delta = ssd->OOB[phy].Timestamp - cur_target_timestamp;
             if(delta != 0 && delta < original_delta) {
@@ -1334,7 +1334,7 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
 
 //TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
    
-    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
         // printf("phy %lu \r\n", phy);
         struct nand_page *pg_iter = NULL;
         if(!check[phy]){
@@ -1394,7 +1394,7 @@ static void *worker(void *arg)
     int id = pkg->id;
     int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
     // printf("id %d \r\n", id);
-    for (size_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
+    for (uint64_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
         // printf("physical_page_num %lu \r\n", physical_page_num);
         struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
 
@@ -1405,8 +1405,8 @@ static void *worker(void *arg)
             perror("file open fail");
         }
         
-        size_t writeOOB = write(fd, &ssd->OOB[physical_page_num], sizeof(struct FG_OOB));
-        if (writeOOB != (size_t)sizeof(struct FG_OOB)) {
+        uint64_t writeOOB = write(fd, &ssd->OOB[physical_page_num], sizeof(struct FG_OOB));
+        if (writeOOB != (uint64_t)sizeof(struct FG_OOB)) {
             printf("written %lu \r\n", (uint64_t)writeOOB);
             perror("file write fail");
             close(fd);  // Close the file descriptor
@@ -1414,8 +1414,8 @@ static void *worker(void *arg)
         }
         // Calculate the offset for the current page
         char *ram_data = mb + (physical_page_num * bytes_per_pages);
-        size_t written = write(fd, ram_data, bytes_per_pages);
-        if (written != (size_t)bytes_per_pages) {
+        uint64_t written = write(fd, ram_data, bytes_per_pages);
+        if (written != (uint64_t)bytes_per_pages) {
             printf("written %lu \r\n", (uint64_t)written);
             perror("file write fail");
             close(fd);  // Close the file descriptor
@@ -1452,7 +1452,7 @@ static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
     n->sec_erase = 127;
 
     
-    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
         if(ssd->OOB[phy].LPA == 3327){
             struct ppa twofivesix = pgidx2ppa(ssd, phy);
             printf("ch %d, lun %d, plane %d, block %d, page %d -> time %ld\r\n", twofivesix.g.ch, twofivesix.g.lun, twofivesix.g.pl, twofivesix.g.blk, twofivesix.g.pg, ssd->OOB[phy].Timestamp);
