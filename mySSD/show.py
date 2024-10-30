@@ -167,32 +167,32 @@ class HexAsciiViewer:
             ascii_lines = []
             line_numbers_lines = []
             content = file.read()
-            OOB = content[:32]
-            data = content[32:]
-            LPA = int.from_bytes(OOB[:8], byteorder='little')
-            P_PPA = OOB[8:16]
-            Timestamp = int.from_bytes(OOB[16:24], byteorder='little')
-            RIP = int.from_bytes(OOB[24:28], byteorder='little')
-            # for i in P_PPA : print(i, " ")
+            # OOB = content[:32]
+            # data = content[32:]
+            # LPA = int.from_bytes(OOB[:8], byteorder='little')
+            # P_PPA = OOB[8:16]
+            # Timestamp = int.from_bytes(OOB[16:24], byteorder='little')
+            # RIP = int.from_bytes(OOB[24:28], byteorder='little')
+            # # for i in P_PPA : print(i, " ")
             
-            block = int.from_bytes(P_PPA[:2], byteorder='little')
-            page = int.from_bytes(P_PPA[2:4], byteorder='little')
-            plane = int.from_bytes(P_PPA[5:6], byteorder='little')
-            lun = int.from_bytes(P_PPA[6:7], byteorder='little')
-            ch = int.from_bytes(P_PPA[7:8], byteorder='little') & 0xFE
+            # block = int.from_bytes(P_PPA[:2], byteorder='little')
+            # page = int.from_bytes(P_PPA[2:4], byteorder='little')
+            # plane = int.from_bytes(P_PPA[5:6], byteorder='little')
+            # lun = int.from_bytes(P_PPA[6:7], byteorder='little')
+            # ch = int.from_bytes(P_PPA[7:8], byteorder='little') & 0xFE
 
-            formatted_str = "LPA: %s, Timestamp: %d, RIP, %d" % (LPA, Timestamp, RIP)
-            hex_lines.append(formatted_str)
-            ascii_lines.append(formatted_str)
-            line_numbers_lines.append("")
-            formatted_str = "ch %d, lun %d, plane %d, block %d, page %d" % (ch, lun, plane, block, page)
-            hex_lines.append(formatted_str)
-            ascii_lines.append(formatted_str)
-            line_numbers_lines.append("")
+            # formatted_str = "LPA: %s, Timestamp: %d, RIP, %d" % (LPA, Timestamp, RIP)
+            # hex_lines.append(formatted_str)
+            # ascii_lines.append(formatted_str)
+            # line_numbers_lines.append("")
+            # formatted_str = "ch %d, lun %d, plane %d, block %d, page %d" % (ch, lun, plane, block, page)
+            # hex_lines.append(formatted_str)
+            # ascii_lines.append(formatted_str)
+            # line_numbers_lines.append("")
 
-            for i in range(0, len(data), 16):
-                hex_chunk = ' '.join("{:02x}".format(b) for b in data[i:i+16])
-                ascii_chunk = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in data[i:i+16])
+            for i in range(0, len(content), 16):
+                hex_chunk = ' '.join("{:02x}".format(b) for b in content[i:i+16])
+                ascii_chunk = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in content[i:i+16])
                 line_numbers_chunk = ''.join(str(i//16))
                 line_numbers_lines.append(line_numbers_chunk)
                 hex_lines.append(hex_chunk)

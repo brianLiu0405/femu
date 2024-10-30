@@ -48,6 +48,10 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",ch_xfer_lat=${ch_xfer_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",gc_thres_pcent=${gc_thres_pcent}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",gc_thres_pcent_high=${gc_thres_pcent_high}"
 
+echo "create physical nand file"
+./gen.sh
+echo "Done!"
+
 echo ${FEMU_OPTIONS}
 
 if [[ ! -e "$OSIMGF" ]]; then

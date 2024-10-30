@@ -546,7 +546,10 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     // [Brian] modify dram size (for flash data use)
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
-    init_dram_backend(&n->mbe, (bs_size / 3 * 4));
+    // init_dram_backend(&n->mbe, (bs_size / 3 * 4));
+    n->mbe = g_malloc0(sizeof(SsdDramBackend));
+    n->mbe->size = bs_size;
+    n->mbe->logical_space = NULL;
     n->mbe->femu_mode = n->femu_mode;
 
     n->completed = 0;
@@ -603,7 +606,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
-    free_dram_backend(n->mbe);
+    //free_dram_backend(n->mbe);
 
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);

@@ -7,6 +7,8 @@
 // #define THREAD
 #define THREAD_NUM 4
 
+char page_name[256];
+
 static void *ftl_thread(void *arg);
 
 static inline bool should_gc(struct ssd *ssd)
@@ -180,7 +182,7 @@ static inline void check_addr(int a, int max)
     ftl_assert(a >= 0 && a < max);
 }
 
-static struct line *get_next_free_line(struct ssd *ssd, void *mb)
+static struct line *get_next_free_line(struct ssd *ssd)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
@@ -196,10 +198,10 @@ static struct line *get_next_free_line(struct ssd *ssd, void *mb)
 
     // clean current line
     struct ssdparams *spp = &ssd->sp;
-    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    for(int ch=0; ch<spp->nchs; ch++){
-        for(int lun=0; lun<spp->luns_per_ch; lun++){
-            for(int pg=0; pg<spp->pgs_per_blk; pg++){
+    uint64_t bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    for(uint64_t ch=0; ch<spp->nchs; ch++){
+        for(uint64_t lun=0; lun<spp->luns_per_ch; lun++){
+            for(uint64_t pg=0; pg<spp->pgs_per_blk; pg++){
                 struct ppa ppa;
                 ppa.ppa = 0;
                 ppa.g.ch = ch;
@@ -207,8 +209,27 @@ static struct line *get_next_free_line(struct ssd *ssd, void *mb)
                 ppa.g.pg = pg;
                 ppa.g.blk = curline->id;
                 ppa.g.pl = 0;
+
                 uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-                memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
+                // memset the corresponding physical page in file
+                
+                sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+                FILE *file = fopen(page_name, "wb");  // Open the file in binary write mode
+                if (!file) {
+                    perror("file open fail");
+                }
+
+                // Prepare the data to write to the file
+                char *allzero = g_malloc0(bytes_per_pages);
+
+                // Write the data using fwrite
+                if (fwrite(allzero, sizeof(char), bytes_per_pages, file) != bytes_per_pages) {
+                    perror("file write fail");
+                    fclose(file);
+                }
+                g_free(allzero);
+                fclose(file);
+
                 struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
                 old_OOB->LPA = INVALID_LPN;
                 old_OOB->P_PPA = INVALID_PPA;
@@ -221,7 +242,7 @@ static struct line *get_next_free_line(struct ssd *ssd, void *mb)
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd, void *mb)
+static void ssd_advance_write_pointer(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct write_pointer *wpp = &ssd->wp;
@@ -257,7 +278,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd, void *mb)
                 /* current line is used up, pick another empty line */
                 check_addr(wpp->blk, spp->blks_per_pl);
                 wpp->curline = NULL;
-                wpp->curline = get_next_free_line(ssd, mb);
+                wpp->curline = get_next_free_line(ssd);
                 if (!wpp->curline) {
                     /* TODO */
                     abort();
@@ -716,13 +737,27 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->erase_cnt++;
 }
 
-static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data, void *mb)
+static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data)
 {
     struct ssdparams *spp = &ssd->sp;
-    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    uint64_t bytes_per_pages = spp->secsz * spp->secs_per_pg;
 
-    memcpy(data, (char*)(mb + (physical_page_num * bytes_per_pages)), bytes_per_pages);
+    // uint64_t physical_page_num = ppa2pgidx(ssd, ppa);
+    // read data from file
+    // data = read_data_from_file(physical_page_num);
+    sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);  // Use .bin for binary files
+    FILE *file = fopen(page_name, "rb");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+    }
+    
+    size_t read_size = fread(data, sizeof(char), bytes_per_pages, file);
+    if (read_size != bytes_per_pages) {
+        perror("file read fail");
+        fclose(file);
+    }
+
+    fclose(file);
 
     /* advance ssd status, we don't care about how long it takes */
     if (ssd->sp.enable_gc_delay) {
@@ -735,7 +770,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa, char* data, void *mb)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, void *mb, int type)
+static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, int type)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -745,22 +780,68 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     new_ppa = get_new_page(ssd);
 
     struct ssdparams *spp = &ssd->sp;
-    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    uint64_t bytes_per_pages = spp->secsz * spp->secs_per_pg;
+
     uint64_t new_physical_page_num = ppa2pgidx(ssd, &new_ppa);
-    uint64_t new_start_addr = (uint64_t)mb + (new_physical_page_num * bytes_per_pages);
+    // write data to file
+    // uint64_t new_start_addr = write data to file
+    sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", new_ppa.g.ch, new_ppa.g.lun, new_ppa.g.pl, new_ppa.g.blk, new_ppa.g.pg);  // Use .bin for binary files
+    FILE *file = fopen(page_name, "wb");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+    }
+
+    // Write the data using fwrite
+    if (fwrite(data, sizeof(char), bytes_per_pages, file) != bytes_per_pages) {
+        perror("file write fail");
+        fclose(file);
+    }
+
+    fclose(file);
     
-    memcpy((char*)new_start_addr, data, bytes_per_pages);
-
     // check data correct
-    uint64_t old_physical_page_num = ppa2pgidx(ssd, old_ppa);
-    uint64_t old_start_addr = (uint64_t)mb + (old_physical_page_num * bytes_per_pages);
+    char *old_data = g_malloc0(bytes_per_pages);
+    char *new_data = g_malloc0(bytes_per_pages);
+    
+    sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", new_ppa.g.ch, new_ppa.g.lun, new_ppa.g.pl, new_ppa.g.blk, new_ppa.g.pg);  // Use .bin for binary files
+    file = fopen(page_name, "rb");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+    }
+    
+    size_t read_size = fread(new_data, sizeof(char), bytes_per_pages, file);
+    if (read_size != bytes_per_pages) {
+        perror("file read fail");
+        fclose(file);
+    }
 
-    for(int i=0; i<bytes_per_pages; i++){
-        if(((char*)new_start_addr)[i] != ((char*)old_start_addr)[i]){
+    fclose(file);
+
+    sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", old_ppa->g.ch, old_ppa->g.lun, old_ppa->g.pl, old_ppa->g.blk, old_ppa->g.pg);  // Use .bin for binary files
+    file = fopen(page_name, "rb");  // Open the file in binary write mode
+    if (!file) {
+        perror("file open fail");
+    }
+    
+    read_size = fread(old_data, sizeof(char), bytes_per_pages, file);
+    if (read_size != bytes_per_pages) {
+        perror("file read fail");
+        fclose(file);
+    }
+
+    fclose(file);
+
+    uint64_t old_physical_page_num = ppa2pgidx(ssd, old_ppa);
+    // read data from file
+    // uint64_t old_start_addr = (uint64_t)mb + (old_physical_page_num * bytes_per_pages);
+
+    for(uint64_t i=0; i<bytes_per_pages; i++){
+        if(((char*)old_data)[i] != ((char*)new_data)[i]){
             printf("data move error, data incorrect\r\n");
         }
     }
-    // check data correct
+    g_free(old_data);
+    g_free(new_data);
 
     struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
     struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
@@ -802,7 +883,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     }
     clr_RTTbit(ssd, old_ppa);
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd, mb);
+    ssd_advance_write_pointer(ssd);
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -847,7 +928,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 }
 
 /* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
+static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
@@ -861,9 +942,9 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
             char *data = g_malloc0(page_size);
-            gc_read_page(ssd, ppa, data, mb);
+            gc_read_page(ssd, ppa, data);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa, data, mb, NORMAL);
+            gc_write_page(ssd, ppa, data, NORMAL);
             g_free(data);
             cnt++;
         }
@@ -873,9 +954,9 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
             if(curr_RTT){
                 struct FG_OOB curr_pg_OOB = ssd->OOB[physical_page_num];
                 char *data = g_malloc0(page_size);
-                gc_read_page(ssd, ppa, data, mb);
-                if(curr_pg_OOB.RIP) gc_write_page(ssd, ppa, data, mb, SET_RTT);
-                else gc_write_page(ssd, ppa, data, mb, SET_RIP);
+                gc_read_page(ssd, ppa, data);
+                if(curr_pg_OOB.RIP) gc_write_page(ssd, ppa, data, SET_RTT);
+                else gc_write_page(ssd, ppa, data, SET_RIP);
                 g_free(data);
             }
         }
@@ -895,7 +976,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-static int do_gc(struct ssd *ssd, bool force, void* mb)
+static int do_gc(struct ssd *ssd, bool force)
 {
     printf("do_gc\r\n");
     struct line *victim_line = NULL;
@@ -920,7 +1001,7 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
             ppa.g.lun = lun;
             ppa.g.pl = 0;
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa, mb);
+            clean_one_block(ssd, &ppa);
             mark_block_free(ssd, &ppa);
             
             if (spp->enable_gc_delay) {
@@ -947,7 +1028,6 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
     dma_addr_t sg_cur_byte = 0;
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = lbal[0];
-    void *mb = b->logical_space;
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
@@ -960,13 +1040,13 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
     uint64_t curlat = 0;
     uint64_t sublat = 0;
     int r;
-    int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
+    uint64_t bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
 
     if (is_write) {
         dir = DMA_DIRECTION_TO_DEVICE;
         while (should_gc_high(ssd)) {
             /* perform GC here until !should_gc(ssd) */
-            r = do_gc(ssd, true, mb);
+            r = do_gc(ssd, true);
             if (r == -1)
                 break;
         }
@@ -1005,9 +1085,23 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             
             if (mapped_ppa(&old_ppa)) {
                 // read modify write
-                uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
 
-                memcpy(rmw_R_buf, (char*)(mb + (old_physical_page_num * bytes_per_pages)), bytes_per_pages);
+                // uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
+                // read data from file
+                // memcpy(rmw_R_buf, file *, bytes_per_pages);
+                sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", old_ppa.g.ch, old_ppa.g.lun, old_ppa.g.pl, old_ppa.g.blk, old_ppa.g.pg);  // Use .bin for binary files
+                FILE *file = fopen(page_name, "rb");  // Open the file in binary write mode
+                if (!file) {
+                    perror("file open fail");
+                }
+                
+                size_t read_size = fread(rmw_R_buf, sizeof(char), bytes_per_pages, file);
+                if (read_size != bytes_per_pages) {
+                    perror("file read fail");
+                    fclose(file);
+                }
+
+                fclose(file);
                 
                 /* update old page information first */
                 mark_page_invalid(ssd, &old_ppa);
@@ -1024,7 +1118,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             mark_page_valid(ssd, &ppa);
 
             /* need to advance the write pointer here */
-            ssd_advance_write_pointer(ssd, mb);
+            ssd_advance_write_pointer(ssd);
 
 
             // if (dma_memory_rw(qsg->as, cur_addr, mb + (physical_page_num * 4096), cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
@@ -1036,9 +1130,23 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             memcpy(rmw_R_buf + lba_off_in_page, rmw_W_buf, cur_len);
 
-            uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
 
-            memcpy((char*)(mb + (physical_page_num * bytes_per_pages)), rmw_R_buf, bytes_per_pages);
+            uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+            // write data to file
+            // memcpy((char*)(file*), rmw_R_buf, bytes_per_pages);
+            sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+            FILE *file = fopen(page_name, "wb");  // Open the file in binary write mode
+            if (!file) {
+                perror("file open fail");
+            }
+
+            // Write the data using fwrite
+            if (fwrite(rmw_R_buf, sizeof(char), bytes_per_pages, file) != bytes_per_pages) {
+                perror("file write fail");
+                fclose(file);
+            }
+
+            fclose(file);
             
             struct FG_OOB *current_OOB = &(ssd->OOB[physical_page_num]);
             current_OOB->LPA = lpn;
@@ -1056,7 +1164,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             g_free(rmw_W_buf);
         }
         else{
-            uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+            // uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
 
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
                 char* zero_buf = g_malloc0(bytes_per_pages);
@@ -1068,9 +1176,26 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             }
 
             uint64_t lba_off_in_page = (lba % ssd->sp.secs_per_pg) * ssd->sp.secsz;
-            if (dma_memory_rw(qsg->as, cur_addr, mb + (physical_page_num * bytes_per_pages) + lba_off_in_page, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
+
+            // read data from file
+            char* rmw_R_buf = g_malloc0(bytes_per_pages);
+            sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+            FILE *file = fopen(page_name, "rb");  // Open the file in binary write mode
+            if (!file) {
+                perror("file open fail");
+            }
+            
+            size_t read_size = fread(rmw_R_buf, sizeof(char), bytes_per_pages, file);
+            if (read_size != bytes_per_pages) {
+                perror("file read fail");
+                fclose(file);
+            }
+
+            fclose(file);
+            if (dma_memory_rw(qsg->as, cur_addr, rmw_R_buf + lba_off_in_page, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
                 femu_err("dma_memory_rw error\n");
             }
+            g_free(rmw_R_buf);
 
             set_RTTbit(ssd, &ppa);
             struct nand_cmd srd;
@@ -1218,16 +1343,17 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req, FemuCtrl *n)
 
 static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
     printf("secure_erase \r\n");
-    void *mb = n->mbe->logical_space;
 
     // clean current line
+
     struct ssdparams *spp = &ssd->sp;
-    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    for(int ch=0; ch<spp->nchs; ch++){
-        for(int lun=0; lun<spp->luns_per_ch; lun++){
-            for(int pls=0; pls<spp->pls_per_lun; pls++){
-                for(int blk=0; blk<spp->blks_per_pl; blk++){
-                    for(int pg=0; pg<spp->pgs_per_blk; pg++){
+    uint64_t bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    char *allzero = g_malloc0(bytes_per_pages);
+    for(uint64_t ch=0; ch<spp->nchs; ch++){
+        for(uint64_t lun=0; lun<spp->luns_per_ch; lun++){
+            for(uint64_t pls=0; pls<spp->pls_per_lun; pls++){
+                for(uint64_t blk=0; blk<spp->blks_per_pl; blk++){
+                    for(uint64_t pg=0; pg<spp->pgs_per_blk; pg++){
                         struct ppa ppa;
                         ppa.ppa = 0;
                         ppa.g.ch = ch;
@@ -1235,8 +1361,24 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
                         ppa.g.blk = blk;
                         ppa.g.pl = pls;
                         ppa.g.pg = pg;
+                        
                         uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-                        memset((char*)(mb + (physical_page_num * bytes_per_pages)), 0, bytes_per_pages);
+                        // TODO : write data to file
+                        // memset((char*)(mb + (physical_page_num * bytes_per_pages)), 0, bytes_per_pages);
+                        sprintf(page_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
+                        FILE *file = fopen(page_name, "wb");  // Open the file in binary write mode
+                        if (!file) {
+                            perror("file open fail");
+                        }
+
+                        // Prepare the data to write to the file
+                        // Write the data using fwrite
+                        if (fwrite(allzero, sizeof(char), bytes_per_pages, file) != bytes_per_pages) {
+                            perror("file write fail");
+                            fclose(file);
+                        }
+                        fclose(file);
+
                         struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
                         old_OOB->LPA = INVALID_LPN;
                         old_OOB->P_PPA = INVALID_PPA;
@@ -1248,7 +1390,9 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
             }
         }
     }
+    g_free(allzero);
     n->sec_erase = 127;
+    printf("secure_erase done\r\n");
     return 0;
 }
 
@@ -1269,7 +1413,7 @@ static uint64_t do_recovery(struct ssd *ssd, FemuCtrl *n){
     /*     this is recover    */
     struct ssdparams *spp = &ssd->sp;
     char *check = g_malloc0(spp->tt_pgs);
-    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
+    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
         // printf("phy %lu \r\n", phy);
         struct nand_page *pg_iter = NULL;
         if(!check[phy]){
@@ -1332,7 +1476,7 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
     printf("cur_target_ppa  ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg, cur_target_timestamp);
     printf("pre_ppa         ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg, pre_ppa_timestamp);
 
-//TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
+    // find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
    
     for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
         // printf("phy %lu \r\n", phy);
@@ -1349,24 +1493,6 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
                     printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
                     swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
                 }
-                // }
-
-                // if(ssd->OOB[phy].RIP){
-                //     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
-                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
-                //     }
-                //     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
-                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
-                //     }
-                // }
-                // else{
-                //     if(!check[now_ppa_num] && ssd->OOB[phy].Timestamp < ssd->OOB[now_ppa_num].Timestamp){
-                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
-                //     }
-                //     else if(ssd->OOB[phy].Timestamp > ssd->OOB[now_ppa_num].Timestamp){
-                //         swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check, pg_iter);
-                //     }
-                // }
             }
         }
         check[phy] = 1;
@@ -1378,94 +1504,8 @@ static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
     return 0;
 }
 
-struct SsdMbPackage {
-    FemuCtrl *n;
-    struct ssd *ssd;
-    char *mb;
-    int id;
-};
-
-static void *worker(void *arg)
-{
-    struct SsdMbPackage *pkg = (struct SsdMbPackage *)arg;
-    FemuCtrl *n = pkg->n;
-    struct ssd *ssd = pkg->ssd;
-    char *mb = pkg->mb;
-    int id = pkg->id;
-    int bytes_per_pages = ssd->sp.secs_per_pg * ssd->sp.secsz;
-    // printf("id %d \r\n", id);
-    for (uint64_t physical_page_num = id; physical_page_num < ssd->sp.tt_pgs; physical_page_num += 4) {
-        // printf("physical_page_num %lu \r\n", physical_page_num);
-        struct ppa ppa = pgidx2ppa(ssd, physical_page_num);
-
-        char file_name[255];
-        sprintf(file_name, "mySSD/ch%d/lun%d/pl%d/blk%d/pg%d", ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);  // Use .bin for binary files
-        int fd = open(file_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1) {
-            perror("file open fail");
-        }
-        
-        uint64_t writeOOB = write(fd, &ssd->OOB[physical_page_num], sizeof(struct FG_OOB));
-        if (writeOOB != (uint64_t)sizeof(struct FG_OOB)) {
-            printf("written %lu \r\n", (uint64_t)writeOOB);
-            perror("file write fail");
-            close(fd);  // Close the file descriptor
-            n->sec_erase = 127;
-        }
-        // Calculate the offset for the current page
-        char *ram_data = mb + (physical_page_num * bytes_per_pages);
-        uint64_t written = write(fd, ram_data, bytes_per_pages);
-        if (written != (uint64_t)bytes_per_pages) {
-            printf("written %lu \r\n", (uint64_t)written);
-            perror("file write fail");
-            close(fd);  // Close the file descriptor
-            n->sec_erase = 127;
-        }
-
-        close(fd);  // Close the file descriptor after writing
-    }
-}
-
-int p2l_file_num = 0;
 static uint64_t dump_p2l(struct ssd *ssd, FemuCtrl *n){
     printf("dump p2l\r\n");
-    struct ssdparams *spp = &ssd->sp;
-
-    char file_name[32];
-    sprintf(file_name, "mySSD/L2P_%d", p2l_file_num++);  // Use .bin for binary files
-    FILE *file = fopen(file_name, "wb");  // Open the file in binary write mode
-    if (!file) {
-        perror("file open fail");
-        return 1;
-    }
-    for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
-        struct ppa ppa = get_maptbl_ent(ssd, logic);
-        if (ppa.ppa != INVALID_PPA) {
-            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d, timestamp %lu\n", 
-                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg, ssd->OOB[ppa2pgidx(ssd, &ppa)].Timestamp);
-        }
-        else{
-            fprintf(file, "logic %d: physical %d\n", logic, -1);
-        }
-    }
-    fclose(file);
-    n->sec_erase = 127;
-
-    
-    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
-        if(ssd->OOB[phy].LPA == 3327){
-            struct ppa twofivesix = pgidx2ppa(ssd, phy);
-            printf("ch %d, lun %d, plane %d, block %d, page %d -> time %ld\r\n", twofivesix.g.ch, twofivesix.g.lun, twofivesix.g.pl, twofivesix.g.blk, twofivesix.g.pg, ssd->OOB[phy].Timestamp);
-        }
-    }
-
-    return 0;
-}
-
-static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
-    printf("dump disk\r\n");
-
-    char *mb = (char*) n->mbe->logical_space;
     struct ssdparams *spp = &ssd->sp;
 
     char file_name[32];
@@ -1478,42 +1518,31 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     for (int logic = 0; logic < spp->logic_ttpgs; logic++) {
         struct ppa ppa = get_maptbl_ent(ssd, logic);
         if (ppa.ppa != INVALID_PPA) {
-            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d, timestamp %lu\n", 
-                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg, ssd->OOB[ppa2pgidx(ssd, &ppa)].Timestamp);
+            fprintf(file, "logic %d: ch %d, lun %d, plane %d, block %d, page %d\n", 
+                    logic, ppa.g.ch, ppa.g.lun, ppa.g.pl, ppa.g.blk, ppa.g.pg);
         }
         else{
             fprintf(file, "logic %d: physical %d\n", logic, -1);
         }
     }
     fclose(file);
-    
-    QemuThread threads[THREAD_NUM];
-    struct SsdMbPackage thread_ids[THREAD_NUM];
-
-     for (int i = 0; i < THREAD_NUM; i++) {
-        thread_ids[i].id = i;
-        thread_ids[i].mb = mb;
-        thread_ids[i].ssd = ssd;
-        thread_ids[i].n = n;
-        qemu_thread_create(&threads[i], "worker", worker, &thread_ids[i], QEMU_THREAD_JOINABLE);
-    }
-
-    // 等待所有執行緒完成
-    for (int i = 0; i < THREAD_NUM; i++) {
-        qemu_thread_join(&threads[i]);
-    }
-    
-    printf("\r\nwrite file successful\r\n");
-    
     n->sec_erase = 127;
+
+    
+    for (size_t phy = 0; phy < spp->tt_pgs; phy++) {
+        if(ssd->OOB[phy].LPA == 256){
+            struct ppa twofivesix = pgidx2ppa(ssd, phy);
+            printf("ch %d, lun %d, plane %d, block %d, page %d -> time %ld\r\n", twofivesix.g.ch, twofivesix.g.lun, twofivesix.g.pl, twofivesix.g.blk, twofivesix.g.pg, ssd->OOB[phy].Timestamp);
+        }
+    }
+
     return 0;
 }
+
 
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
-    // ctrl = n;
-    // printf("in ftl.c dma address 0x%p\n", n->mbe);
     struct ssd *ssd = n->ssd;
     NvmeRequest *req = NULL;
     uint64_t lat = 0;
@@ -1535,7 +1564,7 @@ static void *ftl_thread(void *arg)
             // do_recovery(ssd, n);
             do_recovery_new_version(ssd, n);
         }
-        else if(n->sec_erase == 3) dump(ssd, n);
+        // else if(n->sec_erase == 3) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
@@ -1577,7 +1606,7 @@ static void *ftl_thread(void *arg)
 
             /* clean one line if needed (in the background) */
             if (should_gc(ssd)) {
-                do_gc(ssd, false, n->mbe->logical_space);
+                do_gc(ssd, false);
             }
         }
     }

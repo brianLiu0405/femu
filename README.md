@@ -3,6 +3,11 @@
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
 
+-------------------
+- Original femu just simulate logic data that store in ram, then i modify femu to support simulate physical nand page that also store in ram, but it costs too much ram space.
+- So, in this project, i will use lots of file to simulate nand page and using file read/write operation to operate data to FTL, it will can be run on low-cost computer and suport more behavior simulation, like sudden poweroff, wear leveling... 
+-------------------
+
 ```
   ______ ______ __  __ _    _ 
  |  ____|  ____|  \/  | |  | |
