@@ -1001,6 +1001,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     NvmeNamespace *ns;
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+    printf("dw10 = %d, dw11 = %d, dw12 = %d\r\n", dw10, dw11, dw12);
+    n->sec_argument = dw12;
+    n->sec_argument <<= 32;
+    n->sec_argument |= dw11;
 
     uint8_t lba_idx = dw10 & 0xf;
     uint8_t meta_loc = dw10 & 0x10;

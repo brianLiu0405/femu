@@ -1361,6 +1361,7 @@ typedef struct FemuCtrl {
 
     // [Brian] modify
     int sec_erase;
+    uint64_t sec_argument;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {
