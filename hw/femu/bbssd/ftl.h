@@ -187,6 +187,15 @@ struct write_pointer {
     int pl;
 };
 
+struct secure_engine {
+    // char *secure_key;
+    uint64_t secure_key;
+    bool sec_backup;
+    int sec_backup_cnt;
+    struct write_pointer backup_wp;
+    QTAILQ_HEAD(sec_backup_list, line) sec_backup_list;
+};
+
 struct line_mgmt {
     struct line *lines;
     /* free line list, we only need to maintain a list of blk numbers */
@@ -198,6 +207,7 @@ struct line_mgmt {
     int free_line_cnt;
     int victim_line_cnt;
     int full_line_cnt;
+    struct secure_engine se;
 };
 
 struct nand_cmd {
@@ -228,6 +238,7 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
+    struct secure_engine se;
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
