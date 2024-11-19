@@ -1,12 +1,34 @@
 #include "../nvme.h"
 #include "ftl.h"
-#define FEMU_DEBUG_FTL
 // #define PRINT_READ_WRITE
 // #define RW_DEBUG
 #define MODIFY
 // #define THREAD
 #define THREAD_NUM 4
-
+static void print_line_status(struct ssd *ssd){
+    struct line *Oline = NULL;
+    printf("free line list \r\n");
+    QTAILQ_FOREACH(Oline, &ssd->lm.free_line_list, entry){
+        printf("line->id %d, line->vpc %d, line->ipc %d \r\n", Oline->id, Oline->vpc, Oline->ipc);
+    }
+    Oline = NULL;
+    printf("full line list \r\n");
+    QTAILQ_FOREACH(Oline, &ssd->lm.full_line_list, entry){
+        printf("line->id %d \r\n", Oline->id);
+    }
+    Oline = NULL;
+    printf("sec backup list \r\n");
+    QTAILQ_FOREACH(Oline, &ssd->lm.se.sec_backup_list, entry){
+        printf("line->id %d \r\n", Oline->id);
+    }
+    Oline = NULL;
+    printf("victim line pq \r\n");
+    for (int i = 1; i < ssd->lm.victim_line_pq->size ;i++) {
+        struct line* victim_line = ssd->lm.victim_line_pq->d[i];
+        printf("line->id %d \r\n", victim_line->id);
+    }
+    printf("======= current line %d \r\n", ssd->wp.curline->id);
+}
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 static struct line *get_young_block(struct ssd *ssd, void *mb);
 
@@ -29,7 +51,7 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
-    ftl_assert(lpn < ssd->sp.spp->logic_ttpgs);
+    ftl_assert(lpn < ssd->sp.logic_ttpgs);
     ssd->maptbl[lpn] = *ppa;
 }
 
@@ -44,15 +66,22 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
             ppa->g.blk * spp->pgs_per_blk + \
             ppa->g.pg;
 
-    ftl_assert(pgidx < spp->tt_pgs);
+    // ftl_assert(pgidx < spp->tt_pgs);
 
     return pgidx;
 }
 
 static struct ppa pgidx2ppa(struct ssd *ssd, uint64_t idx)
 {
-    struct ppa ppa;
+    struct ppa ppa = {0};
     struct ssdparams *spp = &ssd->sp;
+
+    if (idx >= spp->tt_pgs) {
+        ppa.ppa = UNMAPPED_PPA;
+        return ppa;
+    }
+
+    uint64_t original_idx = idx;
 
     ppa.g.pg = idx % spp->pgs_per_blk;
     idx /= spp->pgs_per_blk;
@@ -65,7 +94,7 @@ static struct ppa pgidx2ppa(struct ssd *ssd, uint64_t idx)
     ppa.g.ch = idx;
 
     uint64_t pgidx = ppa2pgidx(ssd, &ppa);
-    ftl_assert(pgidx == idx);
+    ftl_assert(pgidx == original_idx);
 
     return ppa;
 }
@@ -213,21 +242,23 @@ static inline void check_addr(int a, int max)
 //     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
 //     for(int ch=0; ch<spp->nchs; ch++){
 //         for(int lun=0; lun<spp->luns_per_ch; lun++){
-//             for(int pg=0; pg<spp->pgs_per_blk; pg++){
-//                 struct ppa ppa;
-//                 ppa.ppa = 0;
-//                 ppa.g.ch = ch;
-//                 ppa.g.lun = lun;
-//                 ppa.g.pg = pg;
-//                 ppa.g.blk = curline->id;
-//                 ppa.g.pl = 0;
-//                 uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-//                 memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
-//                 struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
-//                 old_OOB->LPA = INVALID_LPN;
-//                 old_OOB->P_PPA = INVALID_PPA;
-//                 old_OOB->Timestamp = INVALID_TIME;
-//                 old_OOB->RIP = 0;
+//             for(int pls=0; pls<spp->pls_per_lun; pls++){
+//                 for(int pg=0; pg<spp->pgs_per_blk; pg++){
+//                     struct ppa ppa;
+//                     ppa.ppa = 0;
+//                     ppa.g.ch = ch;
+//                     ppa.g.lun = lun;
+//                     ppa.g.pg = pg;
+//                     ppa.g.blk = curline->id;
+//                     ppa.g.pl = 0;
+//                     uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+//                     memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
+//                     struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+//                     old_OOB->LPA = INVALID_LPN;
+//                     old_OOB->P_PPA = INVALID_PPA;
+//                     old_OOB->Timestamp = INVALID_TIME;
+//                     old_OOB->RIP = 0;
+//                 }
 //             }
 //         }
 //     }
@@ -755,7 +786,6 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
 
-    ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
 
     struct ssdparams *spp = &ssd->sp;
@@ -774,11 +804,11 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
             printf("data move error, data incorrect\r\n");
         }
     }
-    // check data correct
 
     struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
     struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
     if(type){
+        ftl_assert(!valid_lpn(ssd, lpn));
         // if(lpn != old_OOB->LPA){
         if(lpn != INVALID_LPN){
             printf("RTT bug!\r\n");
@@ -810,6 +840,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
         line->ipc++;
     }
     else{
+        ftl_assert(valid_lpn(ssd, lpn));
         if(lpn == INVALID_LPN){
             printf("normal bug!\r\n");
             printf("lpn : %lu, old_OOB->LPA : %lu\r\n", lpn, old_OOB->LPA);
@@ -829,7 +860,6 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
     }
 
     set_rmap_ent(ssd, INVALID_LPN, old_ppa);
-    mark_page_invalid(ssd, old_ppa);
     clr_RTTbit(ssd, old_ppa);
     /* need to advance the write pointer here */
     ssd_advance_write_pointer(ssd, mb);
@@ -881,9 +911,13 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
+    struct nand_block *blk_iter = NULL;
     int cnt = 0;
     int page_size = spp->secsz * spp->secs_per_pg;
-
+    blk_iter = get_blk(ssd, ppa);
+    // ftl_debug("GC-ing block:%d,ipc=%d,vpc=%d,erase_cnt=%d\n", ppa->g.blk,
+    //           blk_iter->ipc, blk_iter->vpc, blk_iter->erase_cnt);
+    // printf("++++++++++++++++++++++++++++++\r\n");
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
@@ -909,9 +943,15 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa, void *mb)
                 g_free(data);
             }
         }
+        else{
+            printf("clean_one_block error\r\n");
+            while(1);
+        }
     }
-
-    ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
+    // printf("cnt: %d\r\n", cnt);
+    // printf("blk_iter->vpc %d\r\n", blk_iter->vpc);
+    // printf("++++++++++++++++++++++++++++++\r\n");
+    ftl_assert(blk_iter->vpc == cnt);
 }
 
 static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
@@ -927,7 +967,9 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
 
 static int do_gc(struct ssd *ssd, bool force, void* mb)
 {
+    #ifdef RW_DEBUG
     printf("do_gc\r\n");
+    #endif
     struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lunp;
@@ -939,9 +981,9 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
         return -1;
     }
     ppa.g.blk = victim_line->id;
-    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
-              ssd->lm.free_line_cnt);
+    // ftl_debug("GC-ing line:%d,ipc=%d,vpc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
+    //           victim_line->ipc, victim_line->vpc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
+    //           ssd->lm.free_line_cnt);
 
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
@@ -1269,21 +1311,23 @@ static struct line *get_older_block(struct ssd *ssd, void *mb){
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
     for(int ch=0; ch<spp->nchs; ch++){
         for(int lun=0; lun<spp->luns_per_ch; lun++){
-            for(int pg=0; pg<spp->pgs_per_blk; pg++){
-                struct ppa ppa;
-                ppa.ppa = 0;
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pg = pg;
-                ppa.g.blk = target_line->id;
-                ppa.g.pl = 0;
-                uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-                memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
-                struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
-                old_OOB->LPA = INVALID_LPN;
-                old_OOB->P_PPA = INVALID_PPA;
-                old_OOB->Timestamp = INVALID_TIME;
-                old_OOB->RIP = 0;
+            for(int pls=0; pls<spp->pls_per_lun; pls++){
+                for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                    struct ppa ppa;
+                    ppa.ppa = 0;
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.pg = pg;
+                    ppa.g.blk = target_line->id;
+                    ppa.g.pl = 0;
+                    uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                    memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
+                    struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+                    old_OOB->LPA = INVALID_LPN;
+                    old_OOB->P_PPA = INVALID_PPA;
+                    old_OOB->Timestamp = INVALID_TIME;
+                    old_OOB->RIP = 0;
+                }
             }
         }
     }
@@ -1314,21 +1358,23 @@ static struct line *get_young_block(struct ssd *ssd, void *mb){
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
     for(int ch=0; ch<spp->nchs; ch++){
         for(int lun=0; lun<spp->luns_per_ch; lun++){
-            for(int pg=0; pg<spp->pgs_per_blk; pg++){
-                struct ppa ppa;
-                ppa.ppa = 0;
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pg = pg;
-                ppa.g.blk = target_line->id;
-                ppa.g.pl = 0;
-                uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-                memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
-                struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
-                old_OOB->LPA = INVALID_LPN;
-                old_OOB->P_PPA = INVALID_PPA;
-                old_OOB->Timestamp = INVALID_TIME;
-                old_OOB->RIP = 0;
+            for(int pls=0; pls<spp->pls_per_lun; pls++){
+                for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                    struct ppa ppa;
+                    ppa.ppa = 0;
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.pg = pg;
+                    ppa.g.blk = target_line->id;
+                    ppa.g.pl = 0;
+                    uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                    memset(((char*)(mb + (physical_page_num * bytes_per_pages))), 0, bytes_per_pages);
+                    struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+                    old_OOB->LPA = INVALID_LPN;
+                    old_OOB->P_PPA = INVALID_PPA;
+                    old_OOB->Timestamp = INVALID_TIME;
+                    old_OOB->RIP = 0;
+                }
             }
         }
     }
@@ -1464,7 +1510,32 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
         ssd->lm.se.sec_backup = true;
         init_backup_wp(ssd, mb);
     }
-    printf("ssd->lm.se.sec_backup %d \r\n", ssd->lm.se.sec_backup);
+// modify to line clean
+
+    // int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    // struct nand_page *pg_iter = NULL;
+    // struct nand_block *blk_iter = NULL;
+    // struct line *line = NULL;
+    // QTAILQ_FOREACH(line, &ssd->lm.free_line_list, entry){
+    //     printf("line->id %d, line->vpc %d, line->ipc %d \r\n", line->id, line->vpc, line->ipc);
+    // }
+    // line = NULL;
+    // printf("full line list \r\n");
+    // QTAILQ_FOREACH(line, &ssd->lm.full_line_list, entry){
+    //     printf("line->id %d \r\n", line->id);
+    // }
+    // line = NULL;
+    // printf("sec backup list \r\n");
+    // QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
+    //     printf("line->id %d \r\n", line->id);
+    // }
+    // printf("victim line pq \r\n");
+    // for (int i = 1; i < ssd->lm.victim_line_pq->size ;i++) {
+    //     struct line* victim_line = ssd->lm.victim_line_pq->d[i];
+    //     printf("line->id %d \r\n", victim_line->id);
+    // }
+
+
 
     // clean current line
     int bytes_per_pages = spp->secsz * spp->secs_per_pg;
@@ -1542,12 +1613,9 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
                             blk_iter->ipc--;
                             line->ipc--;
                         }
-                        // pg_iter->status = PG_FREE;
+                        pg_iter->status = PG_FREE;
                     }
-                    // printf("blk %d \r\n", blk);
-                    // printf("blk_iter->ipc %d \r\n", blk_iter->ipc);
-                    // printf("blk_iter->vpc %d \r\n", blk_iter->vpc);
-                    // assert(blk_iter->ipc == 0 && blk_iter->vpc == 0);
+                    assert(blk_iter->ipc == 0 && blk_iter->vpc == 0);
                 }
             }
         }
@@ -1565,7 +1633,10 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
             victim_line_get_pri, victim_line_set_pri,
             victim_line_get_pos, victim_line_set_pos);
     QTAILQ_INIT(&lm->full_line_list);
-    QTAILQ_INIT(&lm->se.sec_backup_list);
+    if(sanitize){
+        QTAILQ_INIT(&lm->se.sec_backup_list);
+        lm->se.sec_backup_cnt = 0;
+    }
 
     struct line *clear_line;
     lm->free_line_cnt = 0;
@@ -1591,86 +1662,127 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
         lm->free_line_cnt++;
     }
 
-    ftl_assert(lm->free_line_cnt == lm->tt_lines);
+    /* wpp->curline is always our next-to-write super-block */
+    struct write_pointer *wpp = &ssd->wp;
+    wpp->curline = get_young_block(ssd, mb);
+    wpp->ch = 0;
+    wpp->lun = 0;
+    wpp->pg = 0;
+    wpp->blk = wpp->curline->id;
+    wpp->pl = 0;
+    uint64_t all_lines = lm->free_line_cnt + lm->se.sec_backup_cnt;
+    if(lm->se.backup_wp.curline) all_lines++;
+    if(ssd->wp.curline) all_lines++;
+
+    ftl_assert(all_lines == lm->tt_lines);
     lm->victim_line_cnt = 0;
     lm->full_line_cnt = 0;
+
     n->sec_erase = 127;
     return 0;
     
 }
 
-static void swap_in_l2p(struct ssd *ssd, uint64_t phy, uint64_t now_ppa_num, struct ppa iter_ppa, struct ppa now_ppa, char *check){ 
-    if (ssd->OOB[phy].LPA == ssd->OOB[now_ppa_num].LPA) {
-        struct ssdparams *spp = &ssd->sp;
-        set_rmap_ent(ssd, INVALID_LPN, &now_ppa);
-        // mark_page_invalid(ssd, &now_ppa);
-        set_rmap_ent(ssd, ssd->OOB[phy].LPA, &iter_ppa);
-        set_maptbl_ent(ssd, ssd->OOB[phy].LPA, &iter_ppa);
-        // mark_page_valid(ssd, &iter_ppa);
+static struct ppa copy_to_new_page(struct ssd *ssd, struct ppa *old_ppa, void *mb){ 
+    struct ppa new_ppa;
+    struct ssdparams *spp = &ssd->sp;
+    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    uint64_t old_physical_page_num = ppa2pgidx(ssd, old_ppa);
+    uint64_t old_start_addr = (uint64_t)mb + (old_physical_page_num * bytes_per_pages);
+    uint64_t lpn = ssd->OOB[old_physical_page_num].LPA;
 
-        struct nand_page *pg = NULL;
-        struct nand_block *blk = NULL;
-        struct line *line = NULL;
+    ftl_assert(valid_lpn(ssd, lpn));
+    new_ppa = get_new_page(ssd);
+    // printf("new_ppa.ppa %lu \r\n", new_ppa.ppa);
 
-        if(ssd->lm.se.sec_backup){
-            pg = NULL;
-            pg = get_pg(ssd, &iter_ppa);
-            pg->status = PG_VALID;
+    uint64_t new_physical_page_num = ppa2pgidx(ssd, &new_ppa);
+    uint64_t new_start_addr = (uint64_t)mb + (new_physical_page_num * bytes_per_pages);
+    
+    memcpy((char*)new_start_addr, (char*)old_start_addr, bytes_per_pages);
 
-            /* update corresponding block status */
-            blk = NULL;
-            blk = get_blk(ssd, &iter_ppa);
-            printf("blk->vpc %d  spp->pgs_per_blk %d \r\n", blk->vpc, spp->pgs_per_blk);
-            ftl_assert(blk->vpc >= 0 && blk->vpc < spp->pgs_per_blk);
-            blk->vpc++;
-            printf("blk->ipc %d  spp->pgs_per_blk %d \r\n", blk->ipc, spp->pgs_per_blk);
-            ftl_assert(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
-            blk->ipc--;
-
-            /* update corresponding line status */
-            line = NULL;
-            line = get_line(ssd, &iter_ppa);
-            printf("line->vpc %d  spp->pgs_per_line %d \r\n", line->vpc, spp->pgs_per_line);
-            ftl_assert(line->vpc >= 0 && line->vpc < spp->pgs_per_line);
-            line->vpc++;
-            printf("line->ipc %d  spp->pgs_per_line %d \r\n", line->ipc, spp->pgs_per_line);
-            ftl_assert(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
-            line->ipc--;
+    // check data correct
+    for(int i=0; i<bytes_per_pages; i++){
+        if(((char*)new_start_addr)[i] != ((char*)old_start_addr)[i]){
+            printf("data move error, data incorrect\r\n");
         }
-        else{
+    }
+    struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
+    struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
+    current_OOB->LPA = old_OOB->LPA;
+    current_OOB->P_PPA = INVALID_PPA;
+    current_OOB->Timestamp = old_OOB->Timestamp;
+    current_OOB->RIP = 0;
+    ssd_advance_write_pointer(ssd, mb);
+    return new_ppa;
+}
+static void update_to_new(struct ssd *ssd, struct ppa *build_ppa, uint64_t logic, void *mb){ 
+    // move data to new page
+
+    uint64_t phy = ppa2pgidx(ssd, build_ppa);
+    struct ssdparams *spp = &ssd->sp;
+
+    struct nand_page *pg = NULL;
+    struct nand_block *blk = NULL;
+    struct line *line = NULL;
+    struct line_mgmt *lm = &ssd->lm;
+    if(lm->se.sec_backup){
+        struct ppa move_ppa = copy_to_new_page(ssd, build_ppa, mb);
+        set_rmap_ent(ssd, ssd->OOB[phy].LPA, &move_ppa);
+        set_maptbl_ent(ssd, ssd->OOB[phy].LPA, &move_ppa);
+        mark_page_valid(ssd, &move_ppa);
+    }
+    else{
+        struct ppa now_ppa = get_maptbl_ent(ssd, logic);
+        uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
+        if (now_ppa_num == phy || now_ppa.ppa == INVALID_PPA) {
+            return;
+        }
+        if (ssd->OOB[phy].LPA == ssd->OOB[now_ppa_num].LPA) {
+            // printf("build_ppa->g.blk %d \r\n", build_ppa->g.blk);
+            set_rmap_ent(ssd, INVALID_LPN, &now_ppa);
+            set_rmap_ent(ssd, ssd->OOB[phy].LPA, build_ppa);
+            set_maptbl_ent(ssd, ssd->OOB[phy].LPA, build_ppa);
+
             /* update page status */
             pg = NULL;
-            pg = get_pg(ssd, &iter_ppa);
+            pg = get_pg(ssd, build_ppa);
             pg->status = PG_VALID;
 
             /* update corresponding block status */
             blk = NULL;
-            blk = get_blk(ssd, &iter_ppa);
+            blk = get_blk(ssd, build_ppa);
             ftl_assert(blk->vpc >= 0 && blk->vpc < spp->pgs_per_blk);
             blk->vpc++;
-            ftl_assert(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
+            ftl_assert(blk->ipc > 0 && blk->ipc <= spp->pgs_per_blk);
             blk->ipc--;
 
             /* update corresponding line status */
             line = NULL;
-            line = get_line(ssd, &iter_ppa);
+            line = get_line(ssd, build_ppa);
             ftl_assert(line->vpc >= 0 && line->vpc < spp->pgs_per_line);
             line->vpc++;
-            ftl_assert(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
-            line->ipc--;           
+            ftl_assert(line->ipc > 0 && line->ipc <= spp->pgs_per_line);
+            line->ipc--;
 
+            // if this line become full, i need to move this line from victim list to full list
+            if (line->vpc == spp->pgs_per_line) {
+                /* move line: "victim" -> "full" */
+                pqueue_remove(lm->victim_line_pq, line);
+                lm->victim_line_cnt--;
+                QTAILQ_INSERT_TAIL(&lm->full_line_list, line, entry);
+                lm->full_line_cnt++;
+            }
 
             bool was_full_line = false;
             pg = NULL;
             pg = get_pg(ssd, &now_ppa);
             pg->status = PG_INVALID;
-            struct line_mgmt *lm = &ssd->lm;
 
             blk = NULL;
             blk = get_blk(ssd, &now_ppa);
             ftl_assert(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
             blk->ipc++;
-            ftl_assert(blk->vpc >= 0 && blk->vpc <= spp->pgs_per_blk);
+            ftl_assert(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
             blk->vpc--;
 
             /* update corresponding line status */
@@ -1690,18 +1802,170 @@ static void swap_in_l2p(struct ssd *ssd, uint64_t phy, uint64_t now_ppa_num, str
             } else {
                 line->vpc--;
             }
-
             if (was_full_line) {
-                /* move line: "full" -> "victim" */
                 QTAILQ_REMOVE(&lm->full_line_list, line, entry);
                 lm->full_line_cnt--;
                 pqueue_insert(lm->victim_line_pq, line);
                 lm->victim_line_cnt++;
             }
         }
-
-        check[now_ppa_num] = 1;
+        else{
+            printf("update_to_new fail \r\n");
+            while(1);
+        }
     }
+    
+}
+
+static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
+    printf("time zone recovery \r\n");
+    struct ssdparams *spp = &ssd->sp;
+    void *mb = n->mbe->logical_space;
+    struct ppa *build_maptbl;
+    build_maptbl = g_malloc0(sizeof(struct ppa) * spp->logic_ttpgs);
+    for (int i = 0; i < spp->logic_ttpgs; i++) {
+        build_maptbl[i].ppa = UNMAPPED_PPA;
+    }
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
+        uint64_t phy_lpa = ssd->OOB[phy].LPA;
+        if (phy_lpa == INVALID_LPN || phy_lpa >= spp->logic_ttpgs) continue;
+        struct ppa curr_page;
+        curr_page.ppa = build_maptbl[phy_lpa].ppa;
+        struct line *line = NULL;
+        bool in_free_line = false;
+        struct ppa iter_ppa = pgidx2ppa(ssd, phy);
+        QTAILQ_FOREACH(line, &ssd->lm.free_line_list, entry){
+            if(line->id == iter_ppa.g.blk){
+                in_free_line = true;
+                break;
+            }
+        }
+        if(in_free_line) continue;
+        // printf("phy %lu \r\n", phy);
+        if(curr_page.ppa == UNMAPPED_PPA){
+            struct ppa got_ppa = pgidx2ppa(ssd, phy);
+            build_maptbl[phy_lpa].ppa = got_ppa.ppa;
+        }
+        else{
+            uint64_t curr_page_num = ppa2pgidx(ssd, &curr_page);
+            if(ssd->OOB[phy].Timestamp > ssd->OOB[curr_page_num].Timestamp){
+                struct ppa got_ppa = pgidx2ppa(ssd, phy);
+                build_maptbl[phy_lpa].ppa = got_ppa.ppa;
+            }
+        }
+    }
+
+    uint64_t target_lpa = n->sec_argument;
+    // struct ppa cur_target_ppa = get_maptbl_ent(ssd, target_lpa);
+    struct ppa cur_target_ppa;
+    cur_target_ppa.ppa = build_maptbl[target_lpa].ppa;
+    uint64_t cur_target_ppa_num = ppa2pgidx(ssd, &cur_target_ppa);
+    int64_t cur_target_timestamp = ssd->OOB[cur_target_ppa_num].Timestamp; // assume this ransomware attack
+    /*     this is recover    */
+    char *check = g_malloc0(spp->tt_pgs);
+    int64_t original_delta = cur_target_timestamp;
+    uint64_t pre_ppa_num = 0;
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
+        if(ssd->OOB[phy].LPA == target_lpa){
+            int64_t delta = abs(ssd->OOB[phy].Timestamp - cur_target_timestamp);
+            if(delta != 0 && delta < original_delta) {
+                original_delta = delta;
+                pre_ppa_num = phy;
+            }
+        }
+    }
+
+    int64_t pre_ppa_timestamp = ssd->OOB[pre_ppa_num].Timestamp;
+    struct ppa pre_ppa = pgidx2ppa(ssd, pre_ppa_num);
+    printf("cur_target_ppa  ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg, cur_target_timestamp);
+    printf("pre_ppa         ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg, pre_ppa_timestamp);
+
+    //TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
+   
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
+        // printf("phy %lu \r\n", phy);
+        struct nand_page *pg_iter = NULL;
+        if(!check[phy]){
+            struct ppa iter_ppa = pgidx2ppa(ssd, phy);
+            pg_iter = get_pg(ssd, &iter_ppa);
+            if(ssd->RTTtbl[phy] == 1 && pg_iter->status == PG_INVALID){
+                uint64_t lpn_iter_ppa = ssd->OOB[phy].LPA;
+                // struct ppa now_ppa = get_maptbl_ent(ssd, lpn_iter_ppa);
+                struct ppa now_ppa;
+                now_ppa.ppa = build_maptbl[lpn_iter_ppa].ppa;
+                uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
+                // if(pre_ppa_timestamp > ssd->OOB[phy].Timestamp){
+                if(abs(pre_ppa_timestamp - ssd->OOB[phy].Timestamp) < abs(pre_ppa_timestamp - ssd->OOB[now_ppa_num].Timestamp)){
+                    if (ssd->OOB[phy].LPA == ssd->OOB[now_ppa_num].LPA){
+                        // printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
+                        build_maptbl[lpn_iter_ppa].ppa = iter_ppa.ppa;
+                        check[now_ppa_num] = 1;
+                    }
+                    // update_to_new(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+                }
+            }
+        }
+        check[phy] = 1;
+    }
+    g_free(check);
+    printf("start update to new\r\n");
+    for (uint64_t logic = 0; logic < spp->logic_ttpgs; logic++) {
+        // update_to_new(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+        if(build_maptbl[logic].ppa != UNMAPPED_PPA) {
+            if (build_maptbl[logic].ppa != ssd->maptbl[logic].ppa){
+                update_to_new(ssd, &build_maptbl[logic], logic, mb);
+            }
+        }
+        // printf("logic %d,  %lu, %lu\r\n", logic, build_maptbl[logic].ppa, ssd->maptbl[logic].ppa);
+    }
+    printf("done update to new\r\n");
+
+    if(ssd->lm.se.sec_backup){
+        struct line *line = NULL;
+        struct nand_page *pg_iter = NULL;
+        struct nand_block *blk_iter = NULL;
+        if(ssd->lm.se.backup_wp.curline) QTAILQ_INSERT_TAIL(&ssd->lm.se.sec_backup_list, ssd->lm.se.backup_wp.curline, entry);
+        QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
+            struct ppa ppa;
+            for(int ch=0; ch<spp->nchs; ch++){
+                for(int lun=0; lun<spp->luns_per_ch; lun++){
+                    for(int pls=0; pls<spp->pls_per_lun; pls++){
+                        int blk = line->id;
+                        ppa.ppa = 0;
+                        ppa.g.ch = ch;
+                        ppa.g.lun = lun;
+                        ppa.g.blk = blk;
+                        ppa.g.pl = pls;
+                        blk_iter = get_blk(ssd, &ppa);
+                        blk_iter->ipc = 0;
+                        blk_iter->vpc = 0;
+                        for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                            for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                                ppa.g.pg = pg;
+                                pg_iter = get_pg(ssd, &ppa);
+                                pg_iter->status = PG_FREE;
+                            }
+                        }
+                    }
+                }
+            }
+            line->ipc = 0;
+            line->vpc = 0;
+            line->pos = 0;
+            /* initialize all the lines as free lines */
+            QTAILQ_INSERT_TAIL(&ssd->lm.free_line_list, line, entry);
+            ssd->lm.free_line_cnt++;
+        }
+        QTAILQ_INIT(&ssd->lm.se.sec_backup_list);
+        ssd->lm.se.sec_backup = false;
+        ssd->lm.se.backup_wp.curline = NULL;
+        ssd->lm.se.sec_backup_cnt = 0;
+    }
+
+    g_free(build_maptbl);
+    printf("recovery done\r\n");
+    n->sec_erase = 127;
+    return 0;
 }
 
 /* first version - just back one version for each lpa */
@@ -1746,102 +2010,6 @@ static void swap_in_l2p(struct ssd *ssd, uint64_t phy, uint64_t now_ppa_num, str
 //     n->sec_erase = 127;
 //     return 0;
 // }
-
-// no secure erase fail
-static uint64_t do_recovery_new_version(struct ssd *ssd, FemuCtrl *n){
-    printf("time zone recovery \r\n");
-    struct ssdparams *spp = &ssd->sp;
-    struct ppa *build_maptbl = g_malloc0(sizeof(struct ppa) * spp->logic_ttpgs);
-    for (int i = 0; i < spp->logic_ttpgs; i++) {
-        build_maptbl[i].ppa = UNMAPPED_PPA;
-    }
-    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
-        uint64_t phy_lpa = ssd->OOB[phy].LPA;
-        if(phy_lpa == INVALID_LPN) continue;
-        struct ppa curr_page;
-        curr_page.ppa = build_maptbl[phy_lpa].ppa;
-        struct line *line;
-        bool in_free_line = false;
-        QTAILQ_FOREACH(line, &ssd->lm.free_line_list, entry){
-            // printf("line->id %d\r\n", line->id);
-            if(line->id == curr_page.g.blk){
-                // printf("in free line\r\n");
-                in_free_line = true;
-                break;
-            }
-        }
-        if(in_free_line){
-            continue;
-        }
-        if(curr_page.ppa == UNMAPPED_PPA){
-            struct ppa got_ppa = pgidx2ppa(ssd, phy);
-            build_maptbl[phy_lpa].ppa = got_ppa.ppa;
-        }
-        else{
-            uint64_t curr_page_num = ppa2pgidx(ssd, &curr_page);
-            if(ssd->OOB[phy].Timestamp > ssd->OOB[curr_page_num].Timestamp){
-                struct ppa got_ppa = pgidx2ppa(ssd, phy);
-                build_maptbl[phy_lpa].ppa = got_ppa.ppa;
-            }
-        }
-    }
-
-    uint64_t target_lpa = n->sec_argument;
-    // struct ppa cur_target_ppa = get_maptbl_ent(ssd, target_lpa);
-    struct ppa cur_target_ppa;
-    cur_target_ppa.ppa = build_maptbl[target_lpa].ppa;
-    uint64_t cur_target_ppa_num = ppa2pgidx(ssd, &cur_target_ppa);
-    int64_t cur_target_timestamp = ssd->OOB[cur_target_ppa_num].Timestamp; // assume this ransomware attack
-    /*     this is recover    */
-    char *check = g_malloc0(spp->tt_pgs);
-    int64_t original_delta = cur_target_timestamp;
-    uint64_t pre_ppa_num = 0;
-    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
-        if(ssd->OOB[phy].LPA == target_lpa){
-            int64_t delta = abs(ssd->OOB[phy].Timestamp - cur_target_timestamp);
-            if(delta != 0 && delta < original_delta) {
-                original_delta = delta;
-                pre_ppa_num = phy;
-            }
-        }
-    }
-
-    int64_t pre_ppa_timestamp = ssd->OOB[pre_ppa_num].Timestamp;
-    struct ppa pre_ppa = pgidx2ppa(ssd, pre_ppa_num);
-    printf("cur_target_ppa  ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", cur_target_ppa.g.ch, cur_target_ppa.g.lun, cur_target_ppa.g.pl, cur_target_ppa.g.blk, cur_target_ppa.g.pg, cur_target_timestamp);
-    printf("pre_ppa         ch %d, lun %d, pl %d, blk %d, pg %d -> time %ld\r\n", pre_ppa.g.ch, pre_ppa.g.lun, pre_ppa.g.pl, pre_ppa.g.blk, pre_ppa.g.pg, pre_ppa_timestamp);
-
-//TODO : find current data (encryption) close to ranAttackTime, if timestamp bigger than threshold like average, abandon it, otherwise, swap it
-   
-    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
-        // printf("phy %lu \r\n", phy);
-        struct nand_page *pg_iter = NULL;
-        if(!check[phy]){
-            struct ppa iter_ppa = pgidx2ppa(ssd, phy);
-            pg_iter = get_pg(ssd, &iter_ppa);
-            if(ssd->RTTtbl[phy] == 1 && pg_iter->status == PG_INVALID){
-                uint64_t lpn_iter_ppa = ssd->OOB[phy].LPA;
-                // struct ppa now_ppa = get_maptbl_ent(ssd, lpn_iter_ppa);
-                struct ppa now_ppa;
-                now_ppa.ppa = build_maptbl[lpn_iter_ppa].ppa;
-                uint64_t now_ppa_num = ppa2pgidx(ssd, &now_ppa);
-                // if(pre_ppa_timestamp > ssd->OOB[phy].Timestamp){
-                if(abs(pre_ppa_timestamp - ssd->OOB[phy].Timestamp) < abs(pre_ppa_timestamp - ssd->OOB[now_ppa_num].Timestamp)){
-                    printf("swap in l2p, lpa %lu\r\n", lpn_iter_ppa);
-                    build_maptbl[lpn_iter_ppa].ppa = iter_ppa.ppa;
-                    swap_in_l2p(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
-                }
-            }
-        }
-        check[phy] = 1;
-    }
-    g_free(build_maptbl);
-    g_free(check);
-
-    printf("recovery done\r\n");
-    n->sec_erase = 127;
-    return 0;
-}
 
 struct SsdMbPackage {
     FemuCtrl *n;
