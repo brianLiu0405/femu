@@ -253,24 +253,33 @@ int backend_rw_from_flash(SsdDramBackend *, NvmeRequest *req, uint64_t *, bool, 
 
 uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *maxlat);
 
+#define FEMU_DEBUG_FTL
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
-    do { printf("[FEMU] FTL-Dbg: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[FEMU] FTL-Dbg: " fmt "\r", ## __VA_ARGS__); } while (0)
 #else
 #define ftl_debug(fmt, ...) \
     do { } while (0)
 #endif
 
 #define ftl_err(fmt, ...) \
-    do { fprintf(stderr, "[FEMU] FTL-Err: " fmt, ## __VA_ARGS__); } while (0)
+    do { fprintf(stderr, "[FEMU] FTL-Err: " fmt "\r", ## __VA_ARGS__); } while (0)
 
 #define ftl_log(fmt, ...) \
-    do { printf("[FEMU] FTL-Log: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[FEMU] FTL-Log: " fmt "\r", ## __VA_ARGS__); } while (0)
 
 
 /* FEMU assert() */
 #ifdef FEMU_DEBUG_FTL
-#define ftl_assert(expression) assert(expression)
+// #define ftl_assert(expression) assert(expression)
+#define ftl_assert(expression) \
+    do { \
+        if (!(expression)) { \
+            printf("Assertion failed: in file %s, function %s, line %d\r\n", \
+                    __FILE__, __func__, __LINE__); \
+            assert(expression); \
+        } \
+    } while (0)
 #else
 #define ftl_assert(expression)
 #endif
