@@ -5,6 +5,11 @@
 #define MODIFY
 // #define THREAD
 #define THREAD_NUM 4
+
+static struct line *get_older_block(struct ssd *ssd, void *mb);
+
+static struct line *get_young_block(struct ssd *ssd, void *mb);
+
 static void print_line_status(struct ssd *ssd){
     struct line *Oline = NULL;
     printf("free line list \r\n");
@@ -14,23 +19,25 @@ static void print_line_status(struct ssd *ssd){
     Oline = NULL;
     printf("full line list \r\n");
     QTAILQ_FOREACH(Oline, &ssd->lm.full_line_list, entry){
-        printf("line->id %d \r\n", Oline->id);
+        printf("line->id %d, line->vpc %d, line->ipc %d \r\n", Oline->id, Oline->vpc, Oline->ipc);
+        // printf("line->id %d \r\n", Oline->id);
     }
     Oline = NULL;
     printf("sec backup list \r\n");
     QTAILQ_FOREACH(Oline, &ssd->lm.se.sec_backup_list, entry){
-        printf("line->id %d \r\n", Oline->id);
+        printf("line->id %d, line->vpc %d, line->ipc %d \r\n", Oline->id, Oline->vpc, Oline->ipc);
+        // printf("line->id %d \r\n", Oline->id);
     }
     Oline = NULL;
     printf("victim line pq \r\n");
     for (int i = 1; i < ssd->lm.victim_line_pq->size ;i++) {
         struct line* victim_line = ssd->lm.victim_line_pq->d[i];
-        printf("line->id %d \r\n", victim_line->id);
+        printf("line->id %d, line->vpc %d, line->ipc %d \r\n", victim_line->id, victim_line->vpc, victim_line->ipc);
+        // printf("line->id %d \r\n", victim_line->id);
     }
-    printf("======= current line %d \r\n", ssd->wp.curline->id);
+    printf("======= current line %d, line->vpc %d, line->ipc %d \r\n", ssd->wp.curline->id, ssd->wp.curline->vpc, ssd->wp.curline->ipc);
+
 }
-static struct line *get_older_block(struct ssd *ssd, void *mb);
-static struct line *get_young_block(struct ssd *ssd, void *mb);
 
 static void *ftl_thread(void *arg);
 
@@ -1351,6 +1358,10 @@ static struct line *get_young_block(struct ssd *ssd, void *mb){
             target_line = line;
         }
     }
+    if(target_line == NULL){
+        print_line_status(ssd);
+        while(1);
+    }
     QTAILQ_REMOVE(&ssd->lm.free_line_list, target_line, entry);
     ssd->lm.free_line_cnt--;
 
@@ -1427,12 +1438,12 @@ static void backup_update_write_pointer(struct ssd *ssd, void *mb){
             if (wpp->pg == spp->pgs_per_blk) {
                 wpp->pg = 0;
                 QTAILQ_INSERT_TAIL(&lm->se.sec_backup_list, wpp->curline, entry);
-                struct line *tmp = NULL;
-                printf("backup list: ");
-                QTAILQ_FOREACH(tmp, &lm->se.sec_backup_list, entry){
-                    printf("%d ", tmp->id);
-                }
-                printf("\r\n");
+                // struct line *tmp = NULL;
+                // printf("backup list: ");
+                // QTAILQ_FOREACH(tmp, &lm->se.sec_backup_list, entry){
+                //     printf("%d ", tmp->id);
+                // }
+                // printf("\r\n");
                 lm->se.sec_backup_cnt++;
                 check_addr(wpp->blk, spp->blks_per_pl);
                 wpp->curline = NULL;
@@ -1494,6 +1505,70 @@ static void write_to_backup_block(struct ssd *ssd, struct ppa *ppa, void *mb){
     line->ipc++;
 }
 
+static void clean_line(struct ssd *ssd, void *mb, struct line* line, bool sanitize){
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    for(int ch=0; ch<spp->nchs; ch++){
+        for(int lun=0; lun<spp->luns_per_ch; lun++){
+            for(int pls=0; pls<spp->pls_per_lun; pls++){
+                struct nand_block *blk_iter = NULL;
+                for(int pg=0; pg<spp->pgs_per_blk; pg++){
+                    struct nand_page *pg_iter = NULL;
+                    struct ppa ppa;
+                    ppa.ppa = 0;
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.blk = line->id;
+                    ppa.g.pl = pls;
+                    ppa.g.pg = pg;
+                    pg_iter = NULL;
+                    pg_iter = get_pg(ssd, &ppa);
+                    if (pg_iter == NULL) {
+                        printf("Error: pg_iter is NULL\n");
+                        while(1);
+                    }
+                    uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+                    bool is_valid = (pg_iter->status == PG_VALID);
+                    bool is_invalid = (pg_iter->status == PG_INVALID);
+                    bool is_invalid_and_RTT = (is_invalid && ssd->RTTtbl[physical_page_num]);
+                    if(!sanitize){
+                        if(is_valid || is_invalid_and_RTT){
+                            // continue;
+                            write_to_backup_block(ssd, &ppa, mb);
+                        }
+                    }
+                    memset((char*)(mb + (physical_page_num * bytes_per_pages)), 0, bytes_per_pages);
+                    struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+                    old_OOB->LPA = INVALID_LPN;
+                    old_OOB->P_PPA = INVALID_PPA;
+                    old_OOB->Timestamp = INVALID_TIME;
+                    old_OOB->RIP = 0;
+                    clr_RTTbit(ssd, &ppa);
+                    blk_iter = NULL;
+                    blk_iter = get_blk(ssd, &ppa);
+                    if(is_valid){
+                        blk_iter->vpc--;
+                        line->vpc--;
+                    }
+                    else if(is_invalid){
+                        blk_iter->ipc--;
+                        line->ipc--;
+                    }
+                    pg_iter->status = PG_FREE;
+                }
+                assert(blk_iter->ipc == 0 && blk_iter->vpc == 0);                
+            }
+        }
+    }
+    assert(line->ipc == 0 && line->vpc == 0);
+    line->ipc = 0;
+    line->vpc = 0;
+    line->pos = 0;
+    /* initialize all the lines as free lines */
+    QTAILQ_INSERT_TAIL(&ssd->lm.free_line_list, line, entry);
+    ssd->lm.free_line_cnt++;
+}
+
 // recovery fail after secure erase
 static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
     printf("secure_erase \r\n");
@@ -1511,116 +1586,112 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
         init_backup_wp(ssd, mb);
     }
 // modify to line clean
-
-    // int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    // struct nand_page *pg_iter = NULL;
-    // struct nand_block *blk_iter = NULL;
-    // struct line *line = NULL;
-    // QTAILQ_FOREACH(line, &ssd->lm.free_line_list, entry){
-    //     printf("line->id %d, line->vpc %d, line->ipc %d \r\n", line->id, line->vpc, line->ipc);
-    // }
-    // line = NULL;
-    // printf("full line list \r\n");
+    struct line *line = NULL;
+    struct line *temp = NULL;
+    QTAILQ_INSERT_TAIL(&ssd->lm.full_line_list, ssd->wp.curline, entry);
+    ssd->lm.full_line_cnt++;
+    ssd->wp.curline = NULL;
     // QTAILQ_FOREACH(line, &ssd->lm.full_line_list, entry){
-    //     printf("line->id %d \r\n", line->id);
+    //     printf("id: %d\r\n", line->id);
+    //     clean_line(ssd, mb, line, sanitize);
+    //     ssd->lm.full_line_cnt--;
     // }
-    // line = NULL;
-    // printf("sec backup list \r\n");
-    // QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
-    //     printf("line->id %d \r\n", line->id);
-    // }
-    // printf("victim line pq \r\n");
-    // for (int i = 1; i < ssd->lm.victim_line_pq->size ;i++) {
-    //     struct line* victim_line = ssd->lm.victim_line_pq->d[i];
-    //     printf("line->id %d \r\n", victim_line->id);
-    // }
+    QTAILQ_FOREACH_SAFE(line, &ssd->lm.full_line_list, entry, temp) {
+        clean_line(ssd, mb, line, sanitize);
+        ssd->lm.full_line_cnt--;
+    }
+    for (int i = 1; i < ssd->lm.victim_line_pq->size ;i++) {
+        struct line* victim_line = ssd->lm.victim_line_pq->d[i];
+        clean_line(ssd, mb, victim_line, sanitize);
+        ssd->lm.victim_line_cnt--;
+    }
 
 
 
     // clean current line
-    int bytes_per_pages = spp->secsz * spp->secs_per_pg;
-    struct nand_page *pg_iter = NULL;
-    struct nand_block *blk_iter = NULL;
-    struct line *line = NULL;
-    printf("secure_erase start \r\n");
-    for(int ch=0; ch<spp->nchs; ch++){
-        for(int lun=0; lun<spp->luns_per_ch; lun++){
-            for(int pls=0; pls<spp->pls_per_lun; pls++){
-                for(int blk=0; blk<spp->blks_per_pl; blk++){
-                    line = NULL;
-                    bool in_older_blk_using = false;
-                    QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
-                        if(line->id == blk){
-                            in_older_blk_using = true;
-                            break;
-                        }
-                    }
-                    if(in_older_blk_using || (ssd->lm.se.backup_wp.blk == blk)){
-                        continue;
-                    }
-                    for(int pg=0; pg<spp->pgs_per_blk; pg++){
-                        struct ppa ppa;
-                        ppa.ppa = 0;
-                        ppa.g.ch = ch;
-                        ppa.g.lun = lun;
-                        ppa.g.blk = blk;
-                        ppa.g.pl = pls;
-                        ppa.g.pg = pg;
-                        pg_iter = NULL;
-                        pg_iter = get_pg(ssd, &ppa);
-                        if (pg_iter == NULL) {
-                            printf("Error: pg_iter is NULL\n");
-                            while(1);
-                        }
-                        uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
-                        bool is_valid = (pg_iter->status == PG_VALID);
-                        bool is_invalid = (pg_iter->status == PG_INVALID);
-                        bool is_invalid_and_RTT = (is_invalid && ssd->RTTtbl[physical_page_num]);
-                        if(!sanitize){
-                            if(is_valid || is_invalid_and_RTT){
-                                // continue;
-                                write_to_backup_block(ssd, &ppa, mb);
-                            }
-                        }
-                        memset((char*)(mb + (physical_page_num * bytes_per_pages)), 0, bytes_per_pages);
-                        struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
-                        old_OOB->LPA = INVALID_LPN;
-                        old_OOB->P_PPA = INVALID_PPA;
-                        old_OOB->Timestamp = INVALID_TIME;
-                        old_OOB->RIP = 0;
-                        clr_RTTbit(ssd, &ppa);
-                        // if(blk == 1 && pg==0){
-                        //     printf("blk_iter->ipc %d \r\n", blk_iter->ipc);
-                        //     printf("blk_iter->vpc %d \r\n", blk_iter->vpc);
-                        // }
-                        blk_iter = NULL;
-                        blk_iter = get_blk(ssd, &ppa);
-                        if (blk_iter == NULL) {
-                            printf("Error: blk_iter is NULL\n");
-                            while(1);
-                        }
-                        line = NULL;
-                        line = get_line(ssd, &ppa);
-                        if (line == NULL) {
-                            printf("Error: line is NULL\n");
-                            while(1);
-                        }
-                        if(is_valid){
-                            blk_iter->vpc--;
-                            line->vpc--;
-                        }
-                        else if(is_invalid){
-                            blk_iter->ipc--;
-                            line->ipc--;
-                        }
-                        pg_iter->status = PG_FREE;
-                    }
-                    assert(blk_iter->ipc == 0 && blk_iter->vpc == 0);
-                }
-            }
-        }
-    }
-    printf("secure_erase end \r\n");
+    // int bytes_per_pages = spp->secsz * spp->secs_per_pg;
+    // struct nand_page *pg_iter = NULL;
+    // struct nand_block *blk_iter = NULL;
+    // struct line *line = NULL;
+    // printf("secure_erase start \r\n");
+    // for(int ch=0; ch<spp->nchs; ch++){
+    //     for(int lun=0; lun<spp->luns_per_ch; lun++){
+    //         for(int pls=0; pls<spp->pls_per_lun; pls++){
+    //             for(int blk=0; blk<spp->blks_per_pl; blk++){
+    //                 line = NULL;
+    //                 bool in_older_blk_using = false;
+    //                 QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
+    //                     if(line->id == blk){
+    //                         in_older_blk_using = true;
+    //                         break;
+    //                     }
+    //                 }
+    //                 if(in_older_blk_using || (ssd->lm.se.backup_wp.blk == blk)){
+    //                     continue;
+    //                 }
+    //                 for(int pg=0; pg<spp->pgs_per_blk; pg++){
+    //                     struct ppa ppa;
+    //                     ppa.ppa = 0;
+    //                     ppa.g.ch = ch;
+    //                     ppa.g.lun = lun;
+    //                     ppa.g.blk = blk;
+    //                     ppa.g.pl = pls;
+    //                     ppa.g.pg = pg;
+    //                     pg_iter = NULL;
+    //                     pg_iter = get_pg(ssd, &ppa);
+    //                     if (pg_iter == NULL) {
+    //                         printf("Error: pg_iter is NULL\n");
+    //                         while(1);
+    //                     }
+    //                     uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
+    //                     bool is_valid = (pg_iter->status == PG_VALID);
+    //                     bool is_invalid = (pg_iter->status == PG_INVALID);
+    //                     bool is_invalid_and_RTT = (is_invalid && ssd->RTTtbl[physical_page_num]);
+    //                     if(!sanitize){
+    //                         if(is_valid || is_invalid_and_RTT){
+    //                             // continue;
+    //                             write_to_backup_block(ssd, &ppa, mb);
+    //                         }
+    //                     }
+    //                     memset((char*)(mb + (physical_page_num * bytes_per_pages)), 0, bytes_per_pages);
+    //                     struct FG_OOB *old_OOB = &(ssd->OOB[physical_page_num]);
+    //                     old_OOB->LPA = INVALID_LPN;
+    //                     old_OOB->P_PPA = INVALID_PPA;
+    //                     old_OOB->Timestamp = INVALID_TIME;
+    //                     old_OOB->RIP = 0;
+    //                     clr_RTTbit(ssd, &ppa);
+    //                     // if(blk == 1 && pg==0){
+    //                     //     printf("blk_iter->ipc %d \r\n", blk_iter->ipc);
+    //                     //     printf("blk_iter->vpc %d \r\n", blk_iter->vpc);
+    //                     // }
+    //                     blk_iter = NULL;
+    //                     blk_iter = get_blk(ssd, &ppa);
+    //                     if (blk_iter == NULL) {
+    //                         printf("Error: blk_iter is NULL\n");
+    //                         while(1);
+    //                     }
+    //                     line = NULL;
+    //                     line = get_line(ssd, &ppa);
+    //                     if (line == NULL) {
+    //                         printf("Error: line is NULL\n");
+    //                         while(1);
+    //                     }
+    //                     if(is_valid){
+    //                         blk_iter->vpc--;
+    //                         line->vpc--;
+    //                     }
+    //                     else if(is_invalid){
+    //                         blk_iter->ipc--;
+    //                         line->ipc--;
+    //                     }
+    //                     pg_iter->status = PG_FREE;
+    //                 }
+    //                 assert(blk_iter->ipc == 0 && blk_iter->vpc == 0);
+    //             }
+    //         }
+    //     }
+    // }
+    // printf("secure_erase end \r\n");
     for (int i = 0; i < spp->logic_ttpgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
     }
@@ -1628,7 +1699,7 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
         ssd->rmap[i] = INVALID_LPN;
     }
     struct line_mgmt *lm = &ssd->lm;
-    QTAILQ_INIT(&lm->free_line_list);
+    // QTAILQ_INIT(&lm->free_line_list);
     lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
             victim_line_get_pri, victim_line_set_pri,
             victim_line_get_pos, victim_line_set_pos);
@@ -1638,32 +1709,33 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
         lm->se.sec_backup_cnt = 0;
     }
 
-    struct line *clear_line;
-    lm->free_line_cnt = 0;
-    for (int i = 0; i < lm->tt_lines; i++) {
-        line = NULL;
-        bool in_older_blk_using = false;
-        QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
-            if(line->id == i){
-                in_older_blk_using = true;
-                break;
-            }
-        }
-        if(in_older_blk_using || ssd->lm.se.backup_wp.blk == i){
-            continue;
-        }
-        clear_line = &lm->lines[i];
-        clear_line->id = i;
-        clear_line->ipc = 0;
-        clear_line->vpc = 0;
-        clear_line->pos = 0;
-        /* initialize all the lines as free lines */
-        QTAILQ_INSERT_TAIL(&lm->free_line_list, clear_line, entry);
-        lm->free_line_cnt++;
-    }
+    // struct line *clear_line;
+    // lm->free_line_cnt = 0;
+    // for (int i = 0; i < lm->tt_lines; i++) {
+    //     line = NULL;
+    //     bool in_older_blk_using = false;
+    //     QTAILQ_FOREACH(line, &ssd->lm.se.sec_backup_list, entry){
+    //         if(line->id == i){
+    //             in_older_blk_using = true;
+    //             break;
+    //         }
+    //     }
+    //     if(in_older_blk_using || ssd->lm.se.backup_wp.blk == i){
+    //         continue;
+    //     }
+    //     clear_line = &lm->lines[i];
+    //     clear_line->id = i;
+    //     clear_line->ipc = 0;
+    //     clear_line->vpc = 0;
+    //     clear_line->pos = 0;
+    //     /* initialize all the lines as free lines */
+    //     QTAILQ_INSERT_TAIL(&lm->free_line_list, clear_line, entry);
+    //     lm->free_line_cnt++;
+    // }
 
     /* wpp->curline is always our next-to-write super-block */
     struct write_pointer *wpp = &ssd->wp;
+    ftl_assert(wpp->curline == NULL);
     wpp->curline = get_young_block(ssd, mb);
     wpp->ch = 0;
     wpp->lun = 0;
@@ -1673,7 +1745,6 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
     uint64_t all_lines = lm->free_line_cnt + lm->se.sec_backup_cnt;
     if(lm->se.backup_wp.curline) all_lines++;
     if(ssd->wp.curline) all_lines++;
-
     ftl_assert(all_lines == lm->tt_lines);
     lm->victim_line_cnt = 0;
     lm->full_line_cnt = 0;
@@ -1712,7 +1783,6 @@ static struct ppa copy_to_new_page(struct ssd *ssd, struct ppa *old_ppa, void *m
     current_OOB->P_PPA = INVALID_PPA;
     current_OOB->Timestamp = old_OOB->Timestamp;
     current_OOB->RIP = 0;
-    ssd_advance_write_pointer(ssd, mb);
     return new_ppa;
 }
 static void update_to_new(struct ssd *ssd, struct ppa *build_ppa, uint64_t logic, void *mb){ 
@@ -1730,6 +1800,7 @@ static void update_to_new(struct ssd *ssd, struct ppa *build_ppa, uint64_t logic
         set_rmap_ent(ssd, ssd->OOB[phy].LPA, &move_ppa);
         set_maptbl_ent(ssd, ssd->OOB[phy].LPA, &move_ppa);
         mark_page_valid(ssd, &move_ppa);
+        ssd_advance_write_pointer(ssd, mb);
     }
     else{
         struct ppa now_ppa = get_maptbl_ent(ssd, logic);
