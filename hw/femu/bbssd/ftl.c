@@ -7,7 +7,7 @@
 // #define THREAD
 #define THREAD_NUM 4
 #define ENTROPY
-#define ENTROPY_THRESHOLD 5.5
+#define ENTROPY_INCREASE_THRESHOLD 1.2
 
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 
@@ -15,7 +15,7 @@ static struct line *get_young_block(struct ssd *ssd, void *mb);
 
 uint64_t calculate_hamming_distance(struct ssd *ssd, uint64_t *data1, uint64_t *data2, uint64_t offset, uint64_t length);
 
-static float calculate_entropy(unsigned char *data, size_t size);
+static float calculate_entropy(unsigned char *for_hamming_distance, unsigned char *rmw_R_buf, uint64_t lba_off_in_page, uint64_t cur_len);
 
 static void print_line_status(struct ssd *ssd){
     struct line *Oline = NULL;
@@ -1145,13 +1145,11 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                     uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
                     if(ssd->RTTtbl[old_physical_page_num]){
                         #ifdef ENTROPY
-                        printf("entropy\r\n");
-                        float entropy_value = calculate_entropy((unsigned char *)rmw_R_buf, cur_len);
-                        if(entropy_value < ENTROPY_THRESHOLD){
+                        float entropy_value_increase = calculate_entropy((unsigned char *)for_hamming_distance, (unsigned char *)rmw_R_buf, lba_off_in_page, cur_len);
+                        if(entropy_value_increase < ENTROPY_INCREASE_THRESHOLD){
                             clr_RTTbit(ssd, &old_ppa);
                         }
                         #else
-                        printf("hamming\r\n");
                         uint64_t hamming_value = calculate_hamming_distance(ssd, (uint64_t *)for_hamming_distance, (uint64_t *)rmw_R_buf, lba_off_in_page, cur_len);
                         if(hamming_value < cur_len/100){
                             clr_RTTbit(ssd, &old_ppa);
@@ -2265,21 +2263,29 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     return 0;
 }
 
-static float calculate_entropy(unsigned char *data, size_t size) {
-    int frequency[256] = {0};
+static float calculate_entropy(unsigned char *for_hamming_distance, unsigned char *rmw_R_buf, uint64_t lba_off_in_page, uint64_t cur_len) {
+    int ori_frequency[256] = {0};
+    int new_frequency[256] = {0};
     size_t i;
 
-    for (i = 0; i < size; i++) {
-        frequency[data[i]]++;
+    for (i = lba_off_in_page; i < cur_len; i++) {
+        ori_frequency[for_hamming_distance[i]]++;
+        new_frequency[rmw_R_buf[i]]++;
     }
 
-    float entropy = 0.0;
+    float ori_entropy = 0.0;
+    float new_entropy = 0.0;
     for (i = 0; i < 256; i++) {
-        if (frequency[i] > 0) {
-            float p = (float)frequency[i] / size;
-            entropy -= p * log2(p);
+        if (ori_frequency[i] > 0) {
+            float p = (float)ori_frequency[i] / cur_len;
+            ori_entropy -= p * log2(p);
+        }
+        if (new_frequency[i] > 0) {
+            float p = (float)new_frequency[i] / cur_len;
+            new_entropy -= p * log2(p);
         }
     }
+    float entropy = new_entropy / ori_entropy;
     return entropy;
 }
 
