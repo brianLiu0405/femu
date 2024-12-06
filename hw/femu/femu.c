@@ -74,6 +74,11 @@ static int nvme_start_ctrl(FemuCtrl *n)
 
     // [Brian] modify
     n->sec_erase = 127;
+    n->sec_argument = 0;
+    n->file_solved = 1;
+    n->file_offset = 0;
+    n->file_size = 0;
+    
 
     /* Currently only used by FEMU ZNS extension */
     if (n->ext_ops.start_ctrl) {

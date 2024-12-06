@@ -328,6 +328,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_SET_DB_MEMORY  = 0x7c,
     NVME_ADM_CMD_FEMU_DEBUG     = 0xee,
     NVME_ADM_CMD_FEMU_FLIP      = 0xef,
+    NVME_IOCTL_VENDOR_CMD       = 0xc2,
 };
 
 enum NvmeIoCommands {
@@ -1362,6 +1363,9 @@ typedef struct FemuCtrl {
     // [Brian] modify
     int sec_erase;
     uint64_t sec_argument;
+    bool file_solved;
+    uint64_t file_offset;
+    uint64_t file_size;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {

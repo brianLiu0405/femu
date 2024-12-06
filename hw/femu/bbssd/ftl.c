@@ -1,14 +1,21 @@
 #include "../nvme.h"
 #include "ftl.h"
+#include <math.h>
 // #define PRINT_READ_WRITE
 // #define RW_DEBUG
 #define MODIFY
 // #define THREAD
 #define THREAD_NUM 4
+#define ENTROPY
+#define ENTROPY_THRESHOLD 5.0
 
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 
 static struct line *get_young_block(struct ssd *ssd, void *mb);
+
+uint64_t calculate_hamming_distance(struct ssd *ssd, uint64_t *data1, uint64_t *data2, uint64_t offset, uint64_t length);
+
+static float calculate_entropy(unsigned char *data, size_t size);
 
 static void print_line_status(struct ssd *ssd){
     struct line *Oline = NULL;
@@ -480,6 +487,16 @@ static void ssd_init_RTT(struct ssd *ssd)
     }
 }
 
+static void ssd_init_file_mark(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    ssd->file_mark = g_malloc0(spp->logic_ttpgs);
+    for (int i = 0; i < spp->logic_ttpgs; i++) {
+        ssd->file_mark[i] = false;
+    }
+}
+
 // [Brian] modify
 static void ssd_init_OOB(struct ssd *ssd)
 {
@@ -491,7 +508,7 @@ static void ssd_init_OOB(struct ssd *ssd)
         ssd->OOB[i].P_PPA = INVALID_PPA;
         ssd->OOB[i].Timestamp = INVALID_TIME;
         ssd->OOB[i].RIP = 0;
-        ssd->OOB[i].rsv = 0;
+        ssd->OOB[i].entropy = 0.0;
     }
 }
 
@@ -529,6 +546,7 @@ void ssd_init(FemuCtrl *n)
     // [Brian] modify
     /* initialize RTT */
     ssd_init_RTT(ssd);
+    ssd_init_file_mark(ssd);
     /* initialize OOB */
     ssd_init_OOB(ssd);
 
@@ -1074,6 +1092,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
         if (is_write) {
             char* rmw_R_buf = g_malloc0(bytes_per_pages);
             char* rmw_W_buf = g_malloc0(bytes_per_pages);
+            char* for_hamming_distance = g_malloc0(bytes_per_pages);
             if (!rmw_R_buf || !rmw_W_buf) {
                 if (rmw_R_buf) g_free(rmw_R_buf);
                 if (rmw_W_buf) g_free(rmw_W_buf);
@@ -1087,6 +1106,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                 uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
 
                 memcpy(rmw_R_buf, (char*)(mb + (old_physical_page_num * bytes_per_pages)), bytes_per_pages);
+                memcpy(for_hamming_distance, (char*)(mb + (old_physical_page_num * bytes_per_pages)), bytes_per_pages);
                 
                 /* update old page information first */
                 mark_page_invalid(ssd, &old_ppa);
@@ -1119,6 +1139,40 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             memcpy((char*)(mb + (physical_page_num * bytes_per_pages)), rmw_R_buf, bytes_per_pages);
             
+            if(ssd->file_mark[lpn])
+            {
+                if(mapped_ppa(&old_ppa)){
+                    uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
+                    if(ssd->RTTtbl[old_physical_page_num]){
+                        #ifdef ENTROPY
+                        float entropy_value = calculate_entropy((unsigned char *)rmw_R_buf, cur_len);
+                        if(entropy_value < ENTROPY_THRESHOLD){
+                            clr_RTTbit(ssd, &old_ppa);
+                        }
+                        #else
+                        uint64_t hamming_value = calculate_hamming_distance(ssd, (uint64_t *)for_hamming_distance, (uint64_t *)rmw_R_buf, lba_off_in_page, cur_len);
+                        if(hamming_value < cur_len/100){
+                            clr_RTTbit(ssd, &old_ppa);
+                        }
+                        #endif
+                    }
+                }
+            }
+            
+            // if(ssd->file_mark[lpn])
+            // {
+            //     // printf("file mark get\r\n");
+            //     if(mapped_ppa(&old_ppa)){
+            //         uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
+            //         if(ssd->RTTtbl[old_physical_page_num]){
+            //             uint64_t hamming_value = calculate_hamming_distance(ssd, (uint64_t *)for_hamming_distance, (uint64_t *)rmw_R_buf, lba_off_in_page, cur_len);
+            //             if(hamming_value < cur_len/100){
+            //                 clr_RTTbit(ssd, &old_ppa);
+            //             }
+            //         }
+            //     }
+            // }
+            
             struct FG_OOB *current_OOB = &(ssd->OOB[physical_page_num]);
             current_OOB->LPA = lpn;
             current_OOB->P_PPA = old_ppa.ppa;
@@ -1133,6 +1187,7 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             *maxlat = (curlat > *maxlat) ? curlat : *maxlat;
             g_free(rmw_R_buf);
             g_free(rmw_W_buf);
+            g_free(for_hamming_distance);
         }
         else{
             uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
@@ -1694,6 +1749,7 @@ static uint64_t ssd_secure_erase(struct ssd *ssd, FemuCtrl *n){
     // printf("secure_erase end \r\n");
     for (int i = 0; i < spp->logic_ttpgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
+        ssd->file_mark[i] = false;
     }
     for (int i = 0; i < spp->tt_pgs; i++) {
         ssd->rmap[i] = INVALID_LPN;
@@ -2195,7 +2251,7 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     QemuThread threads[THREAD_NUM];
     struct SsdMbPackage thread_ids[THREAD_NUM];
 
-     for (int i = 0; i < THREAD_NUM; i++) {
+    for (int i = 0; i < THREAD_NUM; i++) {
         thread_ids[i].id = i;
         thread_ids[i].mb = mb;
         thread_ids[i].ssd = ssd;
@@ -2207,6 +2263,13 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     for (int i = 0; i < THREAD_NUM; i++) {
         qemu_thread_join(&threads[i]);
     }
+    uint64_t num_RTT = 0;
+    for(int i=0; i<spp->tt_pgs; i++){
+        if(ssd->RTTtbl[i] == 1){
+            num_RTT++;    
+        }
+    }
+    printf("num_RTT %lu\r\n", num_RTT);
     
     printf("\r\nwrite file successful\r\n");
     
@@ -2214,21 +2277,32 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     return 0;
 }
 
-int calculate_hamming_distance(struct ssd *ssd, uint8_t *data1, uint8_t *data2) {
-    struct ssdparams *spp = &ssd->sp;
-    int hamming_distance = 0;
+static float calculate_entropy(unsigned char *data, size_t size) {
+    int frequency[256] = {0};
+    size_t i;
 
-    for (int i = 0; i < spp->pgs_per_blk; i++) {
-        uint8_t xor_result = data1[i] ^ data2[i];
-
-        // Count the number of 1 bits in the XOR result
-        while (xor_result) {
-            hamming_distance += xor_result & 1;
-            xor_result >>= 1;
-        }
+    for (i = 0; i < size; i++) {
+        frequency[data[i]]++;
     }
 
-    return hamming_distance;
+    float entropy = 0.0;
+    for (i = 0; i < 256; i++) {
+        if (frequency[i] > 0) {
+            float p = (float)frequency[i] / size;
+            entropy -= p * log2(p);
+        }
+    }
+    return entropy;
+}
+
+uint64_t calculate_hamming_distance(struct ssd *ssd, uint64_t *data1, uint64_t *data2, uint64_t offset, uint64_t length) {
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t hamming_distance = 0;
+    for (int i = offset; i < length/8; i++) {
+        uint64_t xor_result = data1[i] ^ data2[i];
+        hamming_distance += __builtin_popcountll(xor_result);
+    }
+    return hamming_distance/8;
 }
 
 static void *ftl_thread(void *arg)
@@ -2259,6 +2333,23 @@ static void *ftl_thread(void *arg)
             do_recovery_new_version(ssd, n);
         }
         else if(n->sec_erase == 3) dump(ssd, n);
+        if(!n->file_solved){
+            n->file_solved = 1;
+            uint64_t lpa = n->file_offset / ssd->sp.secs_per_pg;
+            if(n->file_size > 4096){
+                int iter = n->file_size % 4096 ? n->file_size / 4096 + 1 : n->file_size / 4096;
+                for(int i=lpa; i<lpa+iter; i++){
+                    ssd->file_mark[i] = 1;
+                }
+            }
+            else{
+                ssd->file_mark[lpa] = 1;
+            }
+            // printf("===========\r\n");
+            // printf("file_lpa %llu\r\n", lpa);
+            // printf("file_length %llu\r\n", n->file_size);
+            // printf("file solved\r\n");
+        }
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
