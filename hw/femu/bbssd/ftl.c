@@ -7,7 +7,7 @@
 // #define THREAD
 #define THREAD_NUM 4
 #define ENTROPY
-#define ENTROPY_THRESHOLD 5.0
+#define ENTROPY_THRESHOLD 5.5
 
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 
@@ -1145,11 +1145,13 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                     uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
                     if(ssd->RTTtbl[old_physical_page_num]){
                         #ifdef ENTROPY
+                        printf("entropy\r\n");
                         float entropy_value = calculate_entropy((unsigned char *)rmw_R_buf, cur_len);
                         if(entropy_value < ENTROPY_THRESHOLD){
                             clr_RTTbit(ssd, &old_ppa);
                         }
                         #else
+                        printf("hamming\r\n");
                         uint64_t hamming_value = calculate_hamming_distance(ssd, (uint64_t *)for_hamming_distance, (uint64_t *)rmw_R_buf, lba_off_in_page, cur_len);
                         if(hamming_value < cur_len/100){
                             clr_RTTbit(ssd, &old_ppa);
@@ -1158,20 +1160,6 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                     }
                 }
             }
-            
-            // if(ssd->file_mark[lpn])
-            // {
-            //     // printf("file mark get\r\n");
-            //     if(mapped_ppa(&old_ppa)){
-            //         uint64_t old_physical_page_num = ppa2pgidx(ssd, &old_ppa);
-            //         if(ssd->RTTtbl[old_physical_page_num]){
-            //             uint64_t hamming_value = calculate_hamming_distance(ssd, (uint64_t *)for_hamming_distance, (uint64_t *)rmw_R_buf, lba_off_in_page, cur_len);
-            //             if(hamming_value < cur_len/100){
-            //                 clr_RTTbit(ssd, &old_ppa);
-            //             }
-            //         }
-            //     }
-            // }
             
             struct FG_OOB *current_OOB = &(ssd->OOB[physical_page_num]);
             current_OOB->LPA = lpn;
