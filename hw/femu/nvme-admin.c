@@ -996,21 +996,6 @@ static uint16_t nvme_format_namespace(FemuCtrl *n, NvmeNamespace *ns, uint8_t lb
     return NVME_SUCCESS;
 }
 
-static void nvme_set_vendor(FemuCtrl *n, NvmeCmd *cmd)
-{
-    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
-    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
-    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
-    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
-    n->file_offset = dw11;
-    n->file_offset <<= 32;
-    n->file_offset |= dw10;
-    n->file_size = dw13;
-    n->file_size <<= 32;
-    n->file_size |= dw12;
-    n->file_solved = 0;
-}   
-
 static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
@@ -1106,10 +1091,6 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SECURITY_SEND:
     case NVME_ADM_CMD_SECURITY_RECV:
         return NVME_INVALID_OPCODE | NVME_DNR;
-    case NVME_IOCTL_VENDOR_CMD:
-        // femu_debug("admin cmd,ioctl_vendor_cmd\n");
-        nvme_set_vendor(n, cmd);
-        return NVME_SUCCESS;
     default:
         if (n->ext_ops.admin_cmd) {
             return n->ext_ops.admin_cmd(n, cmd);

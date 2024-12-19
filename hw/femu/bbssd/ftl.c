@@ -6,8 +6,10 @@
 #define MODIFY
 // #define THREAD
 #define THREAD_NUM 4
+// #define GC_DEBUG
 #define ENTROPY
 #define ENTROPY_INCREASE_THRESHOLD 1.2
+uint64_t file_flag = 0x8000000000000000;
 
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 
@@ -992,7 +994,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
 
 static int do_gc(struct ssd *ssd, bool force, void* mb)
 {
-    #ifdef RW_DEBUG
+    #ifdef GC_DEBUG
     printf("do_gc\r\n");
     #endif
     struct line *victim_line = NULL;
@@ -1068,8 +1070,12 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
                 break;
         }
     }
-
-
+    // if(req->is_file){
+    //     for (lpn = start_lpn; lpn <= end_lpn; lpn++){
+    //         printf("lpn: %lu\r\n", lpn);
+    //     }
+    // }
+        
     #ifdef RW_DEBUG
     printf("qsg->nsg: %d\r\n", qsg->nsg);
     printf("backend_rw_from_flash: lpn_S %lu, lpn_E %lu\r\n", start_lpn, end_lpn);
@@ -1139,6 +1145,13 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             memcpy((char*)(mb + (physical_page_num * bytes_per_pages)), rmw_R_buf, bytes_per_pages);
             
+            if(req->is_file){
+                ssd->file_mark[lpn] = true;
+            }
+            else{
+                ssd->file_mark[lpn] = false;
+            }
+
             if(ssd->file_mark[lpn])
             {
                 if(mapped_ppa(&old_ppa)){
@@ -1260,7 +1273,7 @@ uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeReq
     req->slba = slba;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
-
+    req->is_file = (rw->rsvd2 & file_flag) >> 63;
     ret = backend_rw_from_flash(n->mbe, req, &data_offset, req->is_write, n->ssd, maxlat);
     if (!ret) {
         return NVME_SUCCESS;
@@ -2234,24 +2247,25 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     }
     fclose(file);
     
-    QemuThread threads[THREAD_NUM];
-    struct SsdMbPackage thread_ids[THREAD_NUM];
+    // QemuThread threads[THREAD_NUM];
+    // struct SsdMbPackage thread_ids[THREAD_NUM];
 
-    for (int i = 0; i < THREAD_NUM; i++) {
-        thread_ids[i].id = i;
-        thread_ids[i].mb = mb;
-        thread_ids[i].ssd = ssd;
-        thread_ids[i].n = n;
-        qemu_thread_create(&threads[i], "worker", worker, &thread_ids[i], QEMU_THREAD_JOINABLE);
-    }
+    // for (int i = 0; i < THREAD_NUM; i++) {
+    //     thread_ids[i].id = i;
+    //     thread_ids[i].mb = mb;
+    //     thread_ids[i].ssd = ssd;
+    //     thread_ids[i].n = n;
+    //     qemu_thread_create(&threads[i], "worker", worker, &thread_ids[i], QEMU_THREAD_JOINABLE);
+    // }
 
-    // 等待所有執行緒完成
-    for (int i = 0; i < THREAD_NUM; i++) {
-        qemu_thread_join(&threads[i]);
-    }
+    // // 等待所有執行緒完成
+    // for (int i = 0; i < THREAD_NUM; i++) {
+    //     qemu_thread_join(&threads[i]);
+    // }
     uint64_t num_RTT = 0;
     for(int i=0; i<spp->tt_pgs; i++){
         if(ssd->RTTtbl[i] == 1){
+            // printf("lpas %lu,\r\n", ssd->OOB[i].LPA);
             num_RTT++;    
         }
     }
@@ -2327,23 +2341,23 @@ static void *ftl_thread(void *arg)
             do_recovery_new_version(ssd, n);
         }
         else if(n->sec_erase == 3) dump(ssd, n);
-        if(!n->file_solved){
-            n->file_solved = 1;
-            uint64_t lpa = n->file_offset / ssd->sp.secs_per_pg;
-            if(n->file_size > 4096){
-                int iter = n->file_size % 4096 ? n->file_size / 4096 + 1 : n->file_size / 4096;
-                for(int i=lpa; i<lpa+iter; i++){
-                    ssd->file_mark[i] = 1;
-                }
-            }
-            else{
-                ssd->file_mark[lpa] = 1;
-            }
-            // printf("===========\r\n");
-            // printf("file_lpa %llu\r\n", lpa);
-            // printf("file_length %llu\r\n", n->file_size);
-            // printf("file solved\r\n");
-        }
+        // if(!n->file_solved){
+        //     n->file_solved = 1;
+        //     uint64_t lpa = n->file_offset / ssd->sp.secs_per_pg;
+        //     if(n->file_size > 4096){
+        //         int iter = n->file_size % 4096 ? n->file_size / 4096 + 1 : n->file_size / 4096;
+        //         for(int i=lpa; i<lpa+iter; i++){
+        //             ssd->file_mark[i] = 1;
+        //         }
+        //     }
+        //     else{
+        //         ssd->file_mark[lpa] = 1;
+        //     }
+        //     // printf("===========\r\n");
+        //     // printf("file_lpa %llu\r\n", lpa);
+        //     // printf("file_length %llu\r\n", n->file_size);
+        //     // printf("file solved\r\n");
+        // }
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
