@@ -1,3 +1,6 @@
+# ** Only modify to flash-based simulation **
+
+
 [![FEMU Version](https://img.shields.io/badge/FEMU-v7.0-brightgreen)](https://img.shields.io/badge/FEMU-v7.0-brightgreen)
 [![Build Status](https://travis-ci.com/vtess/FEMU.svg?branch=master)](https://travis-ci.com/vtess/FEMU)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
