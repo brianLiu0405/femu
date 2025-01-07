@@ -8,9 +8,6 @@
 #define UNMAPPED_PPA    (~(0ULL))
 #define INVALID_TIME    (~(0ULL))
 
-// [Brian] modify
-#define OUT_OF_BOND_SPACE_SIZE_PER_PAGE  32
-
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -187,15 +184,6 @@ struct write_pointer {
     int pl;
 };
 
-struct secure_engine {
-    // char *secure_key;
-    uint64_t secure_key;
-    bool sec_backup;
-    int sec_backup_cnt;
-    struct write_pointer backup_wp;
-    QTAILQ_HEAD(sec_backup_list, line) sec_backup_list;
-};
-
 struct line_mgmt {
     struct line *lines;
     /* free line list, we only need to maintain a list of blk numbers */
@@ -207,7 +195,6 @@ struct line_mgmt {
     int free_line_cnt;
     int victim_line_cnt;
     int full_line_cnt;
-    struct secure_engine se;
 };
 
 struct nand_cmd {
@@ -216,29 +203,15 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
-struct FG_OOB {
-    uint64_t LPA;
-    uint64_t P_PPA;
-    int64_t Timestamp;
-    uint32_t RIP;
-    float entropy;
-};
-
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
     
-    // [Brian] modify
-    bool *RTTtbl; /* read track bitmap */
-    bool *file_mark; /* file  bitmap */
-    struct FG_OOB *OOB; /* out of bond space (size define OUT_OF_BOND_SPACE_SIZE_PER_PAGE)*/
-
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
-    struct secure_engine se;
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
