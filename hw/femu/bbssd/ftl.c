@@ -9,6 +9,10 @@
 // #define GC_DEBUG
 #define ENTROPY
 #define ENTROPY_INCREASE_THRESHOLD 1.2
+
+uint64_t GC_count = 0;
+uint64_t write_count = 0;
+uint64_t write_in_ssd_count = 0;
 uint64_t file_flag = 0x8000000000000000;
 
 static struct line *get_older_block(struct ssd *ssd, void *mb);
@@ -18,6 +22,8 @@ static struct line *get_young_block(struct ssd *ssd, void *mb);
 uint64_t calculate_hamming_distance(struct ssd *ssd, uint64_t *data1, uint64_t *data2, uint64_t offset, uint64_t length);
 
 static float calculate_entropy(unsigned char *for_hamming_distance, unsigned char *rmw_R_buf, uint64_t lba_off_in_page, uint64_t cur_len);
+
+static void update_to_new(struct ssd *ssd, struct ppa *build_ppa, uint64_t logic, void *mb);
 
 static void print_line_status(struct ssd *ssd){
     struct line *Oline = NULL;
@@ -832,6 +838,8 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
         }
     }
 
+    write_count++;
+
     struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
     struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
     if(type){
@@ -1002,6 +1010,7 @@ static int do_gc(struct ssd *ssd, bool force, void* mb)
     struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun;
+    GC_count++;
 
     victim_line = select_victim_line(ssd, force);
     if (!victim_line) {
@@ -1145,6 +1154,9 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
 
             memcpy((char*)(mb + (physical_page_num * bytes_per_pages)), rmw_R_buf, bytes_per_pages);
             
+            write_count++;
+            write_in_ssd_count++;
+            // reduce backup
             if(req->is_file){
                 ssd->file_mark[lpn] = true;
             }
@@ -1235,6 +1247,166 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
     qemu_sglist_destroy(qsg);
 
     return 0;
+}
+
+struct recovery_meta {
+    uint64_t LPA;
+    uint32_t count;
+    uint32_t version;
+    uint16_t status;
+};
+
+struct time_list {
+    uint64_t time;
+    struct time_list *pre;
+    struct time_list *next;
+};
+
+static void insert_time_list(struct time_list *head, uint64_t time){
+    struct time_list *new_node = g_malloc0(sizeof(struct time_list));
+    new_node->time = time;
+    struct time_list *cur = head;
+    while(cur->next != NULL){
+        if(cur->next->time > time){
+            break;
+        }
+        cur = cur->next;
+    }
+    new_node->next = cur->next;
+    new_node->pre = cur;
+    cur->next = new_node;
+    if(new_node->next != NULL){
+        new_node->next->pre = new_node;
+    }
+}
+
+static void free_time_list(struct time_list *head){
+    struct time_list *cur = head;
+    while(cur->next != NULL){
+        cur = cur->next;
+        free(cur->pre);
+    }
+    free(cur);
+}
+
+static uint64_t timezone_recovery(struct ssd *ssd, FemuCtrl *n, uint64_t specify_time){
+    printf("timezone_recovery\r\n");
+    struct ssdparams *spp = &ssd->sp;
+    void *mb = n->mbe->logical_space;
+    struct ppa *build_maptbl;
+    build_maptbl = g_malloc0(sizeof(struct ppa) * spp->logic_ttpgs);
+    for (int i = 0; i < spp->logic_ttpgs; i++) {
+        build_maptbl[i].ppa = UNMAPPED_PPA;
+    }
+    for (uint64_t phy = 0; phy < spp->tt_pgs; phy++) {
+        if(ssd->OOB[phy].Timestamp > specify_time) continue;
+        uint64_t phy_lpa = ssd->OOB[phy].LPA;
+        if (phy_lpa == INVALID_LPN || phy_lpa >= spp->logic_ttpgs) continue;
+        struct ppa curr_page;
+        curr_page.ppa = build_maptbl[phy_lpa].ppa;
+        struct line *line = NULL;
+        bool in_free_line = false;
+        struct ppa iter_ppa = pgidx2ppa(ssd, phy);
+        QTAILQ_FOREACH(line, &ssd->lm.free_line_list, entry){
+            if(line->id == iter_ppa.g.blk){
+                in_free_line = true;
+                break;
+            }
+        }
+        if(in_free_line) continue;
+        // printf("phy %lu \r\n", phy);
+        if(curr_page.ppa == UNMAPPED_PPA){
+            struct ppa got_ppa = pgidx2ppa(ssd, phy);
+            build_maptbl[phy_lpa].ppa = got_ppa.ppa;
+        }
+        else{
+            uint64_t curr_page_num = ppa2pgidx(ssd, &curr_page);
+            if(ssd->OOB[phy].Timestamp > ssd->OOB[curr_page_num].Timestamp){
+                struct ppa got_ppa = pgidx2ppa(ssd, phy);
+                build_maptbl[phy_lpa].ppa = got_ppa.ppa;
+            }
+        }
+    }
+
+    printf("start update to new\r\n");
+    for (uint64_t logic = 0; logic < spp->logic_ttpgs; logic++) {
+        // update_to_new(ssd, phy, now_ppa_num, iter_ppa, now_ppa, check);
+        if(build_maptbl[logic].ppa != UNMAPPED_PPA) {
+            if (build_maptbl[logic].ppa != ssd->maptbl[logic].ppa){
+                update_to_new(ssd, &build_maptbl[logic], logic, mb);
+            }
+        }
+    }
+    printf("done update to new\r\n");
+
+    g_free(build_maptbl);
+    printf("recovery done\r\n");
+    return 0;
+}
+
+#define RECOVERY_SUCCESS    0x0
+#define RECOVERY_FAIL       0x1
+
+uint16_t RA_recovery(FemuCtrl *n, NvmeCmd *cmd){    
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t cdw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t version = le32_to_cpu(cmd->cdw12);
+    uint32_t complete = le32_to_cpu(cmd->cdw13);
+    uint64_t LPA = cdw11;
+    LPA = LPA << 32 | cdw10;
+    
+    struct recovery_meta rm;
+    struct ssd *ssd = n->ssd;
+    struct ssdparams *spp = &ssd->sp;
+
+    printf("RA_recovery\r\n");
+    rm.LPA = LPA;
+    rm.count = 0;
+    rm.version = 0;
+    rm.status = RECOVERY_SUCCESS;
+    struct time_list *head = g_malloc0(sizeof(struct time_list));
+    head->time = 0;
+    head->pre = NULL;
+    struct time_list *cur = head;
+    for(int i=0; i<spp->tt_pgs; i++){
+        if(ssd->OOB[i].LPA == cdw10){
+            rm.count++;
+            insert_time_list(head, ssd->OOB[i].Timestamp);
+        }
+    }
+    
+    for(int i=0; i<rm.count; i++){
+        printf("time: %lu\r\n", cur->next->time);
+        cur = cur->next;
+    }
+
+    if(version || complete){
+        if(version > rm.count || version == 0){
+            rm.status = RECOVERY_FAIL;
+            free_time_list(head);
+            return dma_read_prp(n, (uint8_t *)&rm, sizeof(rm), prp1, prp2);
+        }
+        else{
+            //do recovery
+            cur = head;
+            printf("specify_time: %lu\r\n", cur->time);
+            for(int i=0; i<version; i++){
+                cur = cur->next;
+            }
+            printf("specify_time: %lu\r\n", cur->time);
+            timezone_recovery(ssd, n, cur->time);
+            if(complete){
+                for(int i=0; i<spp->tt_pgs; i++){
+                    ssd->RTTtbl[i] = 0;
+                }
+            }
+            rm.version = version;
+        }
+    }
+    free_time_list(head);
+    return dma_read_prp(n, (uint8_t *)&rm, sizeof(rm), prp1, prp2);
 }
 
 uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *maxlat)
@@ -1397,7 +1569,7 @@ static struct line *get_older_block(struct ssd *ssd, void *mb){
 }
 
 static struct line *get_young_block(struct ssd *ssd, void *mb){
-    uint64_t min_count = UINT64_MAX;
+    uint64_t min_count = 0xFFFFFFFFFFFFFFFF;
     struct line *target_line = NULL;
     target_line = QTAILQ_FIRST(&ssd->lm.free_line_list);
     struct line *line = NULL;
@@ -1530,6 +1702,8 @@ static void write_to_backup_block(struct ssd *ssd, struct ppa *ppa, void *mb){
     struct FG_OOB *new_OOB = &(ssd->OOB[new_physical_page_num]);
 
     memcpy((char*)(mb + (new_physical_page_num * bytes_per_pages)), (char*)(mb + (physical_page_num * bytes_per_pages)), bytes_per_pages);
+
+    write_count++;
 
     backup_update_write_pointer(ssd, mb);
     new_OOB->LPA = old_OOB->LPA;
@@ -1832,6 +2006,9 @@ static struct ppa copy_to_new_page(struct ssd *ssd, struct ppa *old_ppa, void *m
             printf("data move error, data incorrect\r\n");
         }
     }
+
+    write_count++;
+
     struct FG_OOB *old_OOB = &(ssd->OOB[old_physical_page_num]);
     struct FG_OOB *current_OOB = &(ssd->OOB[new_physical_page_num]);
     current_OOB->LPA = old_OOB->LPA;
@@ -2262,14 +2439,71 @@ static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
     // for (int i = 0; i < THREAD_NUM; i++) {
     //     qemu_thread_join(&threads[i]);
     // }
+    uint64_t num_backup = 0;
     uint64_t num_RTT = 0;
+    uint64_t file_cnt = 0;
+    uint64_t valid_page_cnt = 0;
     for(int i=0; i<spp->tt_pgs; i++){
         if(ssd->RTTtbl[i] == 1){
+            struct nand_page *pg = NULL;
+            struct ppa check_ppa;
+            check_ppa = pgidx2ppa(ssd, i);
+            pg = get_pg(ssd, &check_ppa);
+            if (pg->status == PG_INVALID)
+                num_backup++;
             // printf("lpas %lu,\r\n", ssd->OOB[i].LPA);
-            num_RTT++;    
+            num_RTT++;
+        }
+        if(i<spp->logic_ttpgs){
+            if(ssd->file_mark[i]){
+                file_cnt++;
+            }
+            if(ssd->maptbl[i].ppa != INVALID_PPA){
+                valid_page_cnt++;
+            }
         }
     }
+    uint64_t blk_erase_max = 0;
+    uint64_t blk_erase_min = 0xFFFFFFFFFFFFFFFF;
+    uint64_t blk_erase_avg = 0;
+    for(int i=0; i<spp->blks_per_lun; i++){
+        struct ppa blk_ppa;
+        blk_ppa.ppa = 0;
+        blk_ppa.g.blk = i;
+        struct nand_block *blk = get_blk(ssd, &blk_ppa);
+        if(blk->erase_cnt < blk_erase_min){
+            blk_erase_min = blk->erase_cnt;
+        }
+        if(blk->erase_cnt > blk_erase_max){
+            blk_erase_max = blk->erase_cnt;
+        }
+        blk_erase_avg += blk->erase_cnt;
+    }
+    blk_erase_avg /= spp->blks_per_lun;
+    double sumSquaredDifferences = 0.0;
+
+    for(int i=0; i<spp->blks_per_lun; i++){
+        struct ppa blk_ppa;
+        blk_ppa.ppa = 0;
+        blk_ppa.g.blk = i;
+        struct nand_block *blk = get_blk(ssd, &blk_ppa);
+        double mean = blk_erase_avg;
+        sumSquaredDifferences += pow(blk->erase_cnt - mean, 2);
+    }
+    sumSquaredDifferences = sqrt(sumSquaredDifferences / spp->blks_per_lun);
+
+    printf("num_backup %lu\r\n", num_backup);
     printf("num_RTT %lu\r\n", num_RTT);
+    printf("GC_count %lu\r\n", GC_count);
+    printf("file_cnt %lu\r\n", file_cnt);
+    printf("write_count %lu\r\n", write_count);
+    printf("write_in_ssd_count %lu\r\n", write_in_ssd_count);
+    printf("valid_page_cnt %lu\r\n", valid_page_cnt);
+    printf("blk_erase_max %lu\r\n", blk_erase_max);
+    printf("blk_erase_min %lu\r\n", blk_erase_min);
+    printf("blk_erase_avg %lu\r\n", blk_erase_avg);
+    printf("sumSquaredDifferences %f\r\n", sumSquaredDifferences);
+
     
     printf("\r\nwrite file successful\r\n");
     
@@ -2304,7 +2538,6 @@ static float calculate_entropy(unsigned char *for_hamming_distance, unsigned cha
 }
 
 uint64_t calculate_hamming_distance(struct ssd *ssd, uint64_t *data1, uint64_t *data2, uint64_t offset, uint64_t length) {
-    struct ssdparams *spp = &ssd->sp;
     uint64_t hamming_distance = 0;
     for (int i = offset; i < length/8; i++) {
         uint64_t xor_result = data1[i] ^ data2[i];

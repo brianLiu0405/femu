@@ -95,6 +95,9 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_ADM_CMD_FEMU_FLIP:
         bb_flip(n, cmd);
         return NVME_SUCCESS;
+    case NVME_ADM_CMD_FEMU_RECOVER:
+        femu_debug("admin cmd,recovery\n");
+        return RA_recovery(n, cmd);
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }

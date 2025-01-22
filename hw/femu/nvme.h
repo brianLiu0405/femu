@@ -328,6 +328,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_SET_DB_MEMORY  = 0x7c,
     NVME_ADM_CMD_FEMU_DEBUG     = 0xee,
     NVME_ADM_CMD_FEMU_FLIP      = 0xef,
+    NVME_ADM_CMD_FEMU_RECOVER   = 0xc2,
 };
 
 enum NvmeIoCommands {
