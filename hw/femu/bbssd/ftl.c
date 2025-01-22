@@ -8,6 +8,9 @@
 #define THREAD_NUM 4
 // #define GC_DEBUG
 
+uint64_t write_count = 0;
+uint64_t write_in_ssd_count = 0;
+
 static struct line *get_older_block(struct ssd *ssd, void *mb);
 
 static struct line *get_young_block(struct ssd *ssd, void *mb);
@@ -700,6 +703,8 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, char* data, 
         }
     }
 
+    write_count++;
+
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
@@ -946,6 +951,9 @@ int backend_rw_from_flash(SsdDramBackend *b, NvmeRequest *req, uint64_t *lbal, b
             uint64_t physical_page_num = ppa2pgidx(ssd, &ppa);
 
             memcpy((char*)(mb + (physical_page_num * bytes_per_pages)), rmw_R_buf, bytes_per_pages);
+
+            write_count++;
+            write_in_ssd_count++;
 
             struct nand_cmd swr;
             swr.type = USER_IO;
@@ -1204,6 +1212,75 @@ static struct line *get_young_block(struct ssd *ssd, void *mb){
     return target_line;
 }
 
+static uint64_t dump(struct ssd *ssd, FemuCtrl *n){
+    printf("dump disk\r\n");
+    struct ssdparams *spp = &ssd->sp;
+    // uint64_t valid_page_cnt = 0;
+    // for(int i=0; i<spp->logic_ttpgs; i++){
+    //     if(ssd->maptbl[i].ppa != INVALID_PPA){
+    //         valid_page_cnt++;
+    //     }
+    // }
+    // printf("write_count %lu\r\n", write_count);
+    // printf("valid_page_cnt %lu\r\n", valid_page_cnt);
+    // uint64_t num_backup = 0;
+    // uint64_t num_RTT = 0;
+    // uint64_t file_cnt = 0;
+    uint64_t valid_page_cnt = 0;
+    for(int i=0; i<spp->logic_ttpgs; i++){
+        if(ssd->maptbl[i].ppa != INVALID_PPA){
+            valid_page_cnt++;
+        }
+    }
+    uint64_t blk_erase_max = 0;
+    uint64_t blk_erase_min = 0xFFFFFFFFFFFFFFFF;
+    uint64_t blk_erase_avg = 0;
+    for(int i=0; i<spp->blks_per_lun; i++){
+        struct ppa blk_ppa;
+        blk_ppa.ppa = 0;
+        blk_ppa.g.blk = i;
+        struct nand_block *blk = get_blk(ssd, &blk_ppa);
+        if(blk->erase_cnt < blk_erase_min){
+            blk_erase_min = blk->erase_cnt;
+        }
+        if(blk->erase_cnt > blk_erase_max){
+            blk_erase_max = blk->erase_cnt;
+        }
+        blk_erase_avg += blk->erase_cnt;
+    }
+    blk_erase_avg /= spp->blks_per_lun;
+    double sumSquaredDifferences = 0.0;
+
+    for(int i=0; i<spp->blks_per_lun; i++){
+        struct ppa blk_ppa;
+        blk_ppa.ppa = 0;
+        blk_ppa.g.blk = i;
+        struct nand_block *blk = get_blk(ssd, &blk_ppa);
+        double mean = blk_erase_avg;
+        sumSquaredDifferences += pow(blk->erase_cnt - mean, 2);
+    }
+    sumSquaredDifferences = sqrt(sumSquaredDifferences / spp->blks_per_lun);
+
+    printf("num_backup %lu\r\n", 0);
+    printf("num_RTT %lu\r\n", 0);
+    printf("GC_count %lu\r\n", 0);
+    printf("file_cnt %lu\r\n", 0);
+    printf("write_count %lu\r\n", write_count);
+    printf("write_in_ssd_count %lu\r\n", write_in_ssd_count);
+    printf("valid_page_cnt %lu\r\n", valid_page_cnt);
+    
+    printf("blk_erase_max %lu\r\n", blk_erase_max);
+    printf("blk_erase_min %lu\r\n", blk_erase_min);
+    printf("blk_erase_avg %lu\r\n", blk_erase_avg);
+    printf("sumSquaredDifferences %f\r\n", sumSquaredDifferences);
+    
+    printf("\r\nwrite file successful\r\n");
+    
+    n->sec_erase = 127;
+    return 0;
+}
+
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -1224,6 +1301,7 @@ static void *ftl_thread(void *arg)
     ssd->to_poller = n->to_poller;
 
     while (1) {
+        if(n->sec_erase == 3) dump(ssd, n);
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
