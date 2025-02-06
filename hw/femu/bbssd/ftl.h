@@ -191,9 +191,6 @@ struct secure_engine {
     // char *secure_key;
     uint64_t secure_key;
     bool sec_backup;
-    int sec_backup_cnt;
-    struct write_pointer backup_wp;
-    QTAILQ_HEAD(sec_backup_list, line) sec_backup_list;
 };
 
 struct line_mgmt {
@@ -208,6 +205,9 @@ struct line_mgmt {
     int victim_line_cnt;
     int full_line_cnt;
     struct secure_engine se;
+    int backup_cnt;
+    struct write_pointer backup_wp;
+    QTAILQ_HEAD(backup_list, line) backup_list;
 };
 
 struct nand_cmd {
