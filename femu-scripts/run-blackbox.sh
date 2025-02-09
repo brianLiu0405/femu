@@ -5,7 +5,7 @@
 # image directory
 IMGDIR=$HOME/images
 # Virtual machine disk image
-OSIMGF=$IMGDIR/u20s.qcow2
+OSIMGF=$IMGDIR/android.qcow2
 
 # Configurable SSD Controller layout parameters (must be power of 2)
 secsz=512 # sector size in bytes
@@ -69,7 +69,7 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     ${FEMU_OPTIONS} \
-    -net user,hostfwd=tcp::8080-:22 \
+    -net user,hostfwd=tcp::8080-:8822 \
     -net nic,model=virtio \
-    -nographic \
     -qmp unix:./qmp-sock,server,nowait 2>&1 | tee log
+    # -nographic \
