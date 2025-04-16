@@ -69,7 +69,7 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     ${FEMU_OPTIONS} \
-    -net user,hostfwd=tcp::8080-:8822 \
+    -net user,hostfwd=tcp::8080-:8022 \
     -net nic,model=virtio \
     -qmp unix:./qmp-sock,server,nowait 2>&1 | tee log
     # -nographic \

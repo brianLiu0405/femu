@@ -1436,6 +1436,13 @@ uint16_t nvme_rw_for_flash(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeReq
     int ret;
 
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+    if(req->is_write){
+        printf("write SSD\r\n");
+    }
+    else{
+        printf("read  SSD\r\n");
+    }
+    printf("start lba %lu, number of lba %u\r\n", slba, nlb);
 
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
                                  data_size, meta_size);
